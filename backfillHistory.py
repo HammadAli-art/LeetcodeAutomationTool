@@ -2,14 +2,14 @@
 LeetCode Full History Backfill — run to (re)build everything from scratch
 ----------------------------------------------------------------------------
 Walks your ENTIRE LeetCode submission history, finds every unique accepted
-problem (deduped by title_slug — resubmissions don't count twice), and
-saves + commits + pushes each one using the new nested folder structure.
+problem (deduped by title_slug), and saves + commits + pushes each one
+using the new FLAT folder structure (config.json's folder_priority list).
 
 IMPORTANT: Run this AFTER wiping the old "LeetCode Problems" folder and
 deleting pushed_problems.json, so you get a clean, consistent rebuild.
 
 Usage:
-    python backfillhistory.py
+    python backfillHistory.py
 """
 
 import time
@@ -127,7 +127,7 @@ def main():
         print("Updating README and pushing everything in one commit...")
         update_readme(tracked)
         subprocess.run(["git", "add", "."], cwd=REPO_ROOT, check=True)
-        git_commit_and_push([], f"Rebuild: backfill {len(new_files)} solved problems")
+        git_commit_and_push([], f"Rebuild: backfill {len(new_files)} solved problems (flat folders)")
     else:
         print("Nothing new to push.")
 

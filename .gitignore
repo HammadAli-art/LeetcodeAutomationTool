@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Personal LeetCode tracking data — different per user, shouldn't be versioned
+pushed_problems.json

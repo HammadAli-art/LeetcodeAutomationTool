@@ -1,16 +1,16 @@
 """
-LeetCode Accepted Submission Poller — v0.4
+LeetCode Accepted Submission Poller — v0.5
 --------------------------------------------
 What's new in this version:
-1. NESTED folders: Level 1 = base tag (Array/String if present), Level 2 =
-   all remaining tags combined (e.g. LeetCode Problems/Array/HashTable/).
-   No tag information is lost anymore.
-2. Tracking is now keyed by the problem's title_slug (not submission id),
-   so resubmitting an already-solved problem does NOT inflate your README
-   stats or create duplicate commits.
+1. FLAT folders: one problem = one folder, chosen by an ordered priority
+   list in config.json (e.g. Array beats Binary Search/Sorting/etc — a
+   data-structure tag always wins over a technique tag).
+2. RESUBMIT support: if you solve a problem again (e.g. a better solution),
+   the old file is overwritten and a "Resubmit X. Title" commit is made —
+   it no longer gets silently skipped.
 
-SETUP: same as before — env vars (LEETCODE_USERNAME, LEETCODE_SESSION,
-LEETCODE_CSRF), config.json in the same folder.
+SETUP: env vars (LEETCODE_USERNAME, LEETCODE_SESSION, LEETCODE_CSRF),
+config.json in the same folder.
 """
 
 import os
@@ -26,22 +26,13 @@ import requests
 
 CONFIG_FILE = "config.json"
 
-DEFAULT_CONFIG = {
-    "repo_root": r"C:\Users\Hammad\Documents\JAVA\DSACodingPractice",
-    "problems_subdir": "LeetCode Problems",
-    "default_folder": "Untagged",
-    "generic_tags": ["Array", "String"],
-    "topic_folder_map": {},
-    "readme_topics": [],
-}
-
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(DEFAULT_CONFIG, f, indent=2)
-        print(f"No {CONFIG_FILE} found — created one with default settings.")
-        return DEFAULT_CONFIG
+        raise FileNotFoundError(
+            f"'{CONFIG_FILE}' not found in this folder. Make sure config.json "
+            f"is in the same directory as leetcodePoller.py before running."
+        )
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -58,8 +49,7 @@ TRACKED_FILE = "pushed_problems.json"
 REPO_ROOT = CONFIG["repo_root"]
 PROBLEMS_SUBDIR = CONFIG["problems_subdir"]
 DEFAULT_FOLDER = CONFIG["default_folder"]
-GENERIC_TAGS = set(CONFIG["generic_tags"])
-TOPIC_FOLDER_MAP = CONFIG["topic_folder_map"]
+FOLDER_PRIORITY = CONFIG["folder_priority"]
 README_TOPICS = CONFIG.get("readme_topics", [])
 
 GRAPHQL_URL = "https://leetcode.com/graphql"
@@ -112,7 +102,7 @@ query questionData($titleSlug: String!) {
 """
 
 # ---------------------------------------------------------------------------
-# Tracking — keyed by title_slug (one entry per PROBLEM, not per submission)
+# Tracking — keyed by title_slug (one entry per PROBLEM)
 # ---------------------------------------------------------------------------
 
 
@@ -168,37 +158,21 @@ def fetch_question_details(title_slug: str):
 
 
 # ---------------------------------------------------------------------------
-# Folder logic — NESTED: primary (base tag) / secondary (combined tags)
+# Flat folder logic (priority list)
 # ---------------------------------------------------------------------------
 
 
-def clean_tag_name(name: str) -> str:
-    return TOPIC_FOLDER_MAP.get(name, name.replace(" ", ""))
-
-
-def determine_folder_path(topic_tags):
-    """Returns (primary_folder, secondary_folder_or_None)."""
+def determine_folder(topic_tags):
     if not topic_tags:
-        return DEFAULT_FOLDER, None
+        return DEFAULT_FOLDER
 
-    tag_names = [t["name"] for t in topic_tags]
+    tag_names = {t["name"] for t in topic_tags}
 
-    primary_raw = None
-    for name in tag_names:
-        if name in GENERIC_TAGS:
-            primary_raw = name
-            break
-    if primary_raw is None:
-        primary_raw = tag_names[0]
+    for entry in FOLDER_PRIORITY:
+        if tag_names.intersection(entry["tags"]):
+            return entry["folder"]
 
-    remaining = [n for n in tag_names if n != primary_raw]
-
-    primary_folder = clean_tag_name(primary_raw)
-    if not remaining:
-        return primary_folder, None
-
-    secondary_folder = "_".join(clean_tag_name(n) for n in remaining)
-    return primary_folder, secondary_folder
+    return DEFAULT_FOLDER
 
 
 # ---------------------------------------------------------------------------
@@ -234,15 +208,8 @@ def save_solution_file(frontend_id, title, code, lang_name, topic_tags):
     if ext == "txt":
         print(f"  NOTE: unrecognized language '{lang_name}', saved as .txt.")
 
-    primary_folder, secondary_folder = determine_folder_path(topic_tags)
-
-    if secondary_folder:
-        folder_path = os.path.join(REPO_ROOT, PROBLEMS_SUBDIR, primary_folder, secondary_folder)
-        folder_label = f"{primary_folder}/{secondary_folder}"
-    else:
-        folder_path = os.path.join(REPO_ROOT, PROBLEMS_SUBDIR, primary_folder)
-        folder_label = primary_folder
-
+    folder_name = determine_folder(topic_tags)
+    folder_path = os.path.join(REPO_ROOT, PROBLEMS_SUBDIR, folder_name)
     os.makedirs(folder_path, exist_ok=True)
 
     filename = f"{frontend_id}_{sanitize_title(title)}.{ext}"
@@ -250,7 +217,7 @@ def save_solution_file(frontend_id, title, code, lang_name, topic_tags):
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(code)
 
-    return file_path, folder_label
+    return file_path, folder_name
 
 
 # ---------------------------------------------------------------------------
@@ -351,11 +318,12 @@ def process_submission(sub, tracked):
     title_slug = sub["titleSlug"]
     submission_id = sub["id"]
 
-    if title_slug in tracked:
-        print(f"'{title}' already solved before — skipping (resubmission, not counted again).")
-        return None
+    is_resubmit = title_slug in tracked
 
-    print(f"NEW ACCEPTED: {title} — fetching code and metadata...")
+    if is_resubmit:
+        print(f"RESUBMIT DETECTED: {title} — updating existing solution...")
+    else:
+        print(f"NEW ACCEPTED: {title} — fetching code and metadata...")
 
     code, lang_name = fetch_submission_code(submission_id)
     if not code:
@@ -391,7 +359,8 @@ def process_submission(sub, tracked):
         paths_to_commit.append(readme_path)
         print("  README.md updated.")
 
-    commit_message = f"Solve {frontend_id}. {title}"
+    action_word = "Resubmit" if is_resubmit else "Solve"
+    commit_message = f"{action_word} {frontend_id}. {title}"
     git_commit_and_push(paths_to_commit, commit_message)
     return record
 
@@ -407,12 +376,26 @@ def main():
     while True:
         try:
             recent = fetch_recent_accepted(LEETCODE_USERNAME)
-            new_ones = [s for s in recent if s["titleSlug"] not in tracked]
+            # Process ALL recent accepted submissions (not just untracked ones)
+            # so resubmits are caught too — process_submission decides new vs resubmit.
+            seen_this_cycle = set()
+            new_activity = False
 
-            for sub in new_ones:
+            for sub in recent:
+                if sub["titleSlug"] in seen_this_cycle:
+                    continue  # avoid double-processing same problem twice in one cycle
+                seen_this_cycle.add(sub["titleSlug"])
+
+                existing = tracked.get(sub["titleSlug"])
+                # Only reprocess if this is a brand-new problem, OR the submission
+                # timestamp is newer than what we already recorded (a real resubmit).
+                if existing and existing.get("timestamp") == sub["timestamp"]:
+                    continue  # same submission we've already handled
+
                 process_submission(sub, tracked)
+                new_activity = True
 
-            if not new_ones:
+            if not new_activity:
                 print("No new submissions found.")
 
         except requests.RequestException as e:
