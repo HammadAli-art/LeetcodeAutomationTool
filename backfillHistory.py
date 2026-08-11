@@ -25,6 +25,7 @@ from leetcodePoller import (
     load_tracked,
     save_tracked,
     REPO_ROOT,
+    SessionExpiredError,
 )
 
 SUBMISSIONS_API = "https://leetcode.com/api/submissions/"
@@ -39,6 +40,12 @@ def fetch_all_accepted_submissions():
     while True:
         url = f"{SUBMISSIONS_API}?offset={offset}&limit={limit}"
         resp = requests.get(url, headers=HEADERS, timeout=20)
+        if resp.status_code == 401:
+            raise SessionExpiredError(
+                "LeetCode rejected the session — your LEETCODE_SESSION/LEETCODE_CSRF "
+                "have likely expired. Get fresh values from DevTools (Application -> "
+                "Cookies -> leetcode.com) and set the env vars again."
+            )
         resp.raise_for_status()
         data = resp.json()
 
@@ -107,7 +114,11 @@ def process_backfill_item(title_slug, sub, tracked):
 
 def main():
     print("Fetching your full accepted submission history — this may take a minute...")
-    accepted = fetch_all_accepted_submissions()
+    try:
+        accepted = fetch_all_accepted_submissions()
+    except SessionExpiredError as e:
+        print(f"\nSTOPPED: {e}\n")
+        return
     print(f"\nFound {len(accepted)} unique solved problems total.\n")
 
     tracked = load_tracked()

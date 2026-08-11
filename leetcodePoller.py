@@ -123,14 +123,27 @@ def save_tracked(data):
 # ---------------------------------------------------------------------------
 
 
+class SessionExpiredError(Exception):
+    """Raised when LeetCode rejects our session cookie (expired/invalid)."""
+    pass
+
+
 def graphql_request(query: str, variables: dict, retries: int = 2):
     payload = {"query": query, "variables": variables}
     last_error = None
     for attempt in range(retries + 1):
         try:
             resp = requests.post(GRAPHQL_URL, json=payload, headers=HEADERS, timeout=20)
+            if resp.status_code == 401:
+                raise SessionExpiredError(
+                    "LeetCode rejected the session — your LEETCODE_SESSION/LEETCODE_CSRF "
+                    "have likely expired. Get fresh values from DevTools (Application -> "
+                    "Cookies -> leetcode.com) and set the env vars again."
+                )
             resp.raise_for_status()
             return resp.json().get("data", {})
+        except SessionExpiredError:
+            raise  # don't retry — a fresh cookie is needed, retrying won't help
         except requests.RequestException as e:
             last_error = e
             if attempt < retries:
@@ -411,6 +424,9 @@ def main():
             if not new_activity:
                 print("No new submissions found.")
 
+        except SessionExpiredError as e:
+            print(f"\nSTOPPED: {e}\n")
+            break
         except requests.RequestException as e:
             print(f"Request failed: {e}")
 
