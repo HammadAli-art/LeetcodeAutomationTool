@@ -319,6 +319,7 @@ def process_submission(sub, tracked):
     submission_id = sub["id"]
 
     is_resubmit = title_slug in tracked
+    old_file_path = tracked.get(title_slug, {}).get("file_path")
 
     if is_resubmit:
         print(f"RESUBMIT DETECTED: {title} — updating existing solution...")
@@ -343,12 +344,20 @@ def process_submission(sub, tracked):
     file_path, folder_label = save_solution_file(frontend_id, title, code, lang_name, topic_tags)
     print(f"  Saved to: {file_path}")
 
+    # If the language changed since the last submission (e.g. C++ -> Java),
+    # the filename/extension is different — remove the old file so we don't
+    # end up with two files for the same problem.
+    if old_file_path and old_file_path != file_path and os.path.exists(old_file_path):
+        os.remove(old_file_path)
+        print(f"  Removed old file (language changed): {old_file_path}")
+
     record = {
         "title": title,
         "timestamp": sub["timestamp"],
         "difficulty": difficulty,
         "tags": tag_names,
         "folder": folder_label,
+        "file_path": file_path,
     }
     tracked[title_slug] = record
     save_tracked(tracked)
@@ -358,6 +367,10 @@ def process_submission(sub, tracked):
     if readme_path:
         paths_to_commit.append(readme_path)
         print("  README.md updated.")
+
+    if old_file_path and old_file_path != file_path and not os.path.exists(old_file_path):
+        # stage the deletion too, so git actually removes it from the repo
+        paths_to_commit.append(old_file_path)
 
     action_word = "Resubmit" if is_resubmit else "Solve"
     commit_message = f"{action_word} {frontend_id}. {title}"
