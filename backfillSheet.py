@@ -97,12 +97,38 @@ def log_to_sheet(problems):
     client = gspread.authorize(creds)
     sheet = client.open_by_key(SHEET_ID).sheet1
 
-    rows = []
+    number_column = sheet.col_values(3)  # column C = Problem Number
+
+    rows_to_append = []
+    updated_count = 0
+
     for p in problems:
         link_formula = f'=HYPERLINK("{p["url"]}", "{p["title"]}")'
-        rows.append([p["date"], p["day"], p["number"], link_formula, p["topic"]])
+        row_values = [p["date"], p["day"], p["number"], link_formula, p["topic"]]
 
-    sheet.append_rows(rows, value_input_option="USER_ENTERED")
+        existing_row_index = None
+        for i, value in enumerate(number_column, start=1):
+            if value.strip() == p["number"]:
+                existing_row_index = i
+                break
+
+        if existing_row_index:
+            sheet.update(
+                f"A{existing_row_index}:E{existing_row_index}",
+                [row_values],
+                value_input_option="USER_ENTERED",
+            )
+            updated_count += 1
+        else:
+            rows_to_append.append(row_values)
+            # Also track it locally so two new problems in this same run
+            # don't collide with each other and both get appended correctly.
+            number_column.append(p["number"])
+
+    if rows_to_append:
+        sheet.append_rows(rows_to_append, value_input_option="USER_ENTERED")
+
+    print(f"  {len(rows_to_append)} new row(s) added, {updated_count} existing row(s) updated.")
 
 
 def main():
