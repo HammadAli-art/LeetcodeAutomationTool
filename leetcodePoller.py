@@ -24,7 +24,8 @@ import requests
 # CONFIG
 # ---------------------------------------------------------------------------
 
-CONFIG_FILE = "config.json"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
 
 def load_config():
@@ -44,7 +45,7 @@ CSRF_TOKEN = os.environ.get("LEETCODE_CSRF", "")
 LEETCODE_USERNAME = os.environ.get("LEETCODE_USERNAME", "")
 
 POLL_INTERVAL_SECONDS = 120
-TRACKED_FILE = "pushed_problems.json"
+TRACKED_FILE = os.path.join(BASE_DIR, "pushed_problems.json")
 
 REPO_ROOT = CONFIG["repo_root"]
 PROBLEMS_SUBDIR = CONFIG["problems_subdir"]
@@ -141,7 +142,10 @@ def graphql_request(query: str, variables: dict, retries: int = 2):
                     "Cookies -> leetcode.com) and set the env vars again."
                 )
             resp.raise_for_status()
-            return resp.json().get("data", {})
+            result = resp.json()
+            if result.get("errors"):
+                raise requests.RequestException(f"GraphQL returned errors: {result['errors']}")
+            return result.get("data", {})
         except SessionExpiredError:
             raise  # don't retry — a fresh cookie is needed, retrying won't help
         except requests.RequestException as e:
@@ -152,7 +156,7 @@ def graphql_request(query: str, variables: dict, retries: int = 2):
     raise last_error
 
 
-def fetch_recent_accepted(username: str, limit: int = 15):
+def fetch_recent_accepted(username: str, limit: int = 20):
     data = graphql_request(RECENT_AC_QUERY, {"username": username, "limit": limit})
     return data.get("recentAcSubmissionList", [])
 
@@ -310,11 +314,18 @@ def git_commit_and_push(file_paths, commit_message, max_push_attempts=2):
             ["git", "commit", "-m", commit_message],
             cwd=REPO_ROOT, capture_output=True, text=True
         )
+        commit_output = commit_result.stdout.lower()
         if commit_result.returncode != 0:
-            if "nothing to commit" in commit_result.stdout.lower():
-                print("  Nothing new to commit — will still try to push.")
+            if "nothing to commit" in commit_output:
+                # Expected recovery case: a previous run already committed
+                # locally but the push failed — safe to just retry the push.
+                print("  Nothing new to commit (already committed earlier) — will still try to push.")
             else:
-                print(f"  Commit warning: {commit_result.stdout.strip()} {commit_result.stderr.strip()}")
+                # A genuine commit failure (e.g. git identity not configured) —
+                # do NOT push, since the new changes were never actually committed.
+                print(f"  Commit failed for a real reason, aborting: "
+                      f"{commit_result.stdout.strip()} {commit_result.stderr.strip()}")
+                return False
 
         for attempt in range(max_push_attempts):
             push_result = subprocess.run(

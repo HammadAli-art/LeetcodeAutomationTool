@@ -1,15 +1,14 @@
 """
-LeetCode Full History Backfill — run to (re)build everything from scratch
+LeetCode Full History Backfill
 ----------------------------------------------------------------------------
 Walks your ENTIRE LeetCode submission history, finds every unique accepted
-problem (deduped by title_slug), and saves + commits + pushes each one
-using the new FLAT folder structure (config.json's folder_priority list).
+problem (deduped by title_slug), and saves + commits + pushes each one that
+ISN'T ALREADY in pushed_problems.json using the flat folder structure
+(config.json's folder_priority list).
 
-IMPORTANT: Run this AFTER wiping the old "LeetCode Problems" folder and
-deleting pushed_problems.json, so you get a clean, consistent rebuild.
-
-Usage:
-    python backfillHistory.py
+NOTE: this does NOT touch problems already tracked — it only picks up ones
+that are missing. For a genuine full rebuild, first delete/reset the
+"LeetCode Problems" folder AND pushed_problems.json, then run this.
 """
 
 import time
@@ -107,6 +106,7 @@ def process_backfill_item(title_slug, sub, tracked):
         "difficulty": difficulty,
         "tags": tag_names,
         "folder": folder_label,
+        "file_path": file_path,
     }
     save_tracked(tracked)
     return True
