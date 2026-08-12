@@ -12,7 +12,7 @@ Run this ONCE.
 import os
 import json
 
-from leetcodePoller import REPO_ROOT, PROBLEMS_SUBDIR, load_tracked, save_tracked
+from leetcodePoller import REPO_ROOT, PROBLEMS_SUBDIR, load_tracked, save_tracked, sanitize_title
 
 
 def find_file_for_problem(folder_name, title_slug, tracked_title):
@@ -21,11 +21,14 @@ def find_file_for_problem(folder_name, title_slug, tracked_title):
     if not os.path.isdir(folder_path):
         return None
 
+    expected_suffix = sanitize_title(tracked_title).lower()
+
     for filename in os.listdir(folder_path):
-        # Filenames look like "217_Contains_Duplicate.java" — match loosely
-        # on the sanitized title so spacing/casing differences don't matter.
+        # Filenames look like "217_Contains_Duplicate.java" — use the SAME
+        # sanitize_title() logic used when the file was originally created,
+        # so hyphens/apostrophes/etc. match consistently.
         name_part = filename.rsplit(".", 1)[0]
-        if name_part.lower().endswith(tracked_title.replace(" ", "_").lower()):
+        if name_part.lower().endswith(expected_suffix):
             return os.path.join(folder_path, filename)
     return None
 
