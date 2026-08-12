@@ -112,10 +112,26 @@ def process_backfill_item(title_slug, sub, tracked):
         "folder": folder_label,
         "file_path": file_path,
     }
-    return True
+    return file_path
+
+
+def check_working_tree_clean():
+    """Refuses to run if there are unrelated uncommitted changes already
+    sitting in the repo — avoids accidentally sweeping them into a backfill
+    commit/push."""
+    result = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+    )
+    return len(result.stdout.strip()) == 0
 
 
 def main():
+    if not check_working_tree_clean():
+        print("ERROR: Your repo has uncommitted changes already. Please commit or "
+              "stash them first, then re-run this script — this avoids accidentally "
+              "sweeping unrelated files into the backfill commit.")
+        return
+
     print("Fetching your full accepted submission history — this may take a minute...")
     try:
         accepted = fetch_all_accepted_submissions()
@@ -125,29 +141,35 @@ def main():
     print(f"\nFound {len(accepted)} unique solved problems total.\n")
 
     tracked = load_tracked()
-    new_files = []
+    new_file_paths = []
 
     for slug, sub in accepted.items():
         try:
-            saved = process_backfill_item(slug, sub, tracked)
-            if saved:
-                new_files.append(slug)
+            result = process_backfill_item(slug, sub, tracked)
+            if result:
+                new_file_paths.append(result)
         except requests.RequestException as e:
             print(f"  Request failed for {slug}: {e}")
 
-    print(f"\nBackfilled {len(new_files)} new problems.")
+    print(f"\nBackfilled {len(new_file_paths)} new problems.")
 
-    if new_files:
-        print("Updating README and pushing everything in one commit...")
-        update_readme(tracked)
-        subprocess.run(["git", "add", "."], cwd=REPO_ROOT, check=True)
-        push_succeeded = git_commit_and_push([], f"Rebuild: backfill {len(new_files)} solved problems (flat folders)")
+    if new_file_paths:
+        print("Updating README and pushing...")
+        readme_path = update_readme(tracked)
+
+        paths_to_commit = list(new_file_paths)
+        if readme_path:
+            paths_to_commit.append(readme_path)
+
+        push_succeeded = git_commit_and_push(
+            paths_to_commit, f"Rebuild: backfill {len(new_file_paths)} solved problems (flat folders)"
+        )
 
         if push_succeeded:
             save_tracked(tracked)
-            print(f"Push succeeded — {len(new_files)} problems saved to tracking.")
+            print(f"Push succeeded — {len(new_file_paths)} problems saved to tracking.")
         else:
-            print(f"WARNING: push failed — none of these {len(new_files)} problems were "
+            print(f"WARNING: push failed — none of these {len(new_file_paths)} problems were "
                   f"marked as tracked. Re-run this script to retry them.")
     else:
         print("Nothing new to push.")
