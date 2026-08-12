@@ -300,7 +300,8 @@ def update_readme(tracked: dict):
 # ---------------------------------------------------------------------------
 
 
-def git_commit_and_push(file_paths, commit_message):
+def git_commit_and_push(file_paths, commit_message, max_push_attempts=2):
+    """Returns True if the push succeeded, False otherwise."""
     try:
         for path in file_paths:
             subprocess.run(["git", "add", path], cwd=REPO_ROOT, check=True)
@@ -315,10 +316,44 @@ def git_commit_and_push(file_paths, commit_message):
             else:
                 print(f"  Commit warning: {commit_result.stdout.strip()} {commit_result.stderr.strip()}")
 
-        subprocess.run(["git", "push"], cwd=REPO_ROOT, check=True)
-        print(f"Pushed: {commit_message}")
+        for attempt in range(max_push_attempts):
+            push_result = subprocess.run(
+                ["git", "push"], cwd=REPO_ROOT, capture_output=True, text=True
+            )
+            if push_result.returncode == 0:
+                print(f"Pushed: {commit_message}")
+                return True
+
+            stderr_lower = push_result.stderr.lower()
+            is_rejected = any(
+                phrase in stderr_lower
+                for phrase in ["rejected", "fetch first", "non-fast-forward"]
+            )
+
+            if is_rejected and attempt < max_push_attempts - 1:
+                print("  Push rejected (remote has new commits) — pulling and retrying...")
+                pull_result = subprocess.run(
+                    ["git", "pull", "--no-edit"], cwd=REPO_ROOT, capture_output=True, text=True
+                )
+                if pull_result.returncode != 0:
+                    if "CONFLICT" in pull_result.stdout or "CONFLICT" in pull_result.stderr:
+                        print("  MERGE CONFLICT during auto-pull — aborting, needs manual fix.")
+                        subprocess.run(["git", "merge", "--abort"], cwd=REPO_ROOT)
+                    else:
+                        print(f"  Auto-pull failed: {pull_result.stderr.strip()}")
+                    return False
+                # merge succeeded, loop again to retry the push
+                continue
+            else:
+                print(f"  Push failed: {push_result.stderr.strip()}")
+                return False
+
+        print("  Push still failing after retry.")
+        return False
+
     except subprocess.CalledProcessError as e:
         print(f"Git step failed: {e}")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -372,22 +407,36 @@ def process_submission(sub, tracked):
         "folder": folder_label,
         "file_path": file_path,
     }
-    tracked[title_slug] = record
-    save_tracked(tracked)
 
-    readme_path = update_readme(tracked)
+    # NOTE: we build the README diff using a temporary in-memory copy of
+    # tracked + this new record, WITHOUT saving it to disk yet — so that if
+    # the git push below fails, pushed_problems.json is left untouched and
+    # this problem will be retried on the next poll cycle instead of being
+    # silently marked "done" forever.
+    tentative_tracked = dict(tracked)
+    tentative_tracked[title_slug] = record
+
+    readme_path = update_readme(tentative_tracked)
     paths_to_commit = [file_path]
     if readme_path:
         paths_to_commit.append(readme_path)
         print("  README.md updated.")
 
     if old_file_path and old_file_path != file_path and not os.path.exists(old_file_path):
-        # stage the deletion too, so git actually removes it from the repo
         paths_to_commit.append(old_file_path)
 
     action_word = "Resubmit" if is_resubmit else "Solve"
     commit_message = f"{action_word} {frontend_id}. {title}"
-    git_commit_and_push(paths_to_commit, commit_message)
+    push_succeeded = git_commit_and_push(paths_to_commit, commit_message)
+
+    if push_succeeded:
+        tracked[title_slug] = record
+        save_tracked(tracked)
+    else:
+        print(f"  WARNING: push failed — '{title}' will be retried next cycle "
+              f"(not marked as done).")
+        return None
+
     return record
 
 
