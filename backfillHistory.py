@@ -100,6 +100,10 @@ def process_backfill_item(title_slug, sub, tracked):
     file_path, folder_label = save_solution_file(frontend_id, title, code, lang_name, topic_tags)
     print(f"  Saved to: {file_path}")
 
+    # NOTE: we only update the in-memory 'tracked' dict here — we do NOT
+    # call save_tracked() yet. The actual disk save happens once in main(),
+    # and ONLY if the final git push succeeds. This prevents problems being
+    # marked "done" if the push fails partway through a large backfill.
     tracked[title_slug] = {
         "title": title,
         "timestamp": sub.get("timestamp"),
@@ -108,7 +112,6 @@ def process_backfill_item(title_slug, sub, tracked):
         "folder": folder_label,
         "file_path": file_path,
     }
-    save_tracked(tracked)
     return True
 
 
@@ -138,7 +141,14 @@ def main():
         print("Updating README and pushing everything in one commit...")
         update_readme(tracked)
         subprocess.run(["git", "add", "."], cwd=REPO_ROOT, check=True)
-        git_commit_and_push([], f"Rebuild: backfill {len(new_files)} solved problems (flat folders)")
+        push_succeeded = git_commit_and_push([], f"Rebuild: backfill {len(new_files)} solved problems (flat folders)")
+
+        if push_succeeded:
+            save_tracked(tracked)
+            print(f"Push succeeded — {len(new_files)} problems saved to tracking.")
+        else:
+            print(f"WARNING: push failed — none of these {len(new_files)} problems were "
+                  f"marked as tracked. Re-run this script to retry them.")
     else:
         print("Nothing new to push.")
 
