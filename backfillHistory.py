@@ -148,6 +148,10 @@ def main():
             result = process_backfill_item(slug, sub, tracked)
             if result:
                 new_file_paths.append(result)
+        except SessionExpiredError as e:
+            print(f"\nSTOPPED mid-backfill: {e}")
+            print(f"Progress so far ({len(new_file_paths)} problems) will still be pushed below.\n")
+            break
         except requests.RequestException as e:
             print(f"  Request failed for {slug}: {e}")
 
