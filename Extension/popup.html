@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>LeetCode GitHub Sync</title>
+  <style>
+    body {
+      width: 280px;
+      padding: 16px;
+      font-family: Arial, sans-serif;
+    }
+    h2 {
+      font-size: 16px;
+      margin: 0 0 12px 0;
+    }
+    label {
+      display: block;
+      font-size: 12px;
+      color: #555;
+      margin-top: 10px;
+      margin-bottom: 4px;
+    }
+    input {
+      width: 100%;
+      padding: 6px;
+      box-sizing: border-box;
+      font-size: 13px;
+    }
+    button {
+      width: 100%;
+      margin-top: 14px;
+      padding: 8px;
+      background: #2ea44f;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    #status {
+      margin-top: 8px;
+      font-size: 12px;
+      color: green;
+    }
+  </style>
+</head>
+<body>
+  <h2>LeetCode GitHub Sync — Settings</h2>
+
+  <label for="token">GitHub Personal Access Token</label>
+  <input type="password" id="token" placeholder="ghp_xxxxxxxxxxxx">
+
+  <label for="repo">Repo (owner/repo-name)</label>
+  <input type="text" id="repo" placeholder="HammadAli-art/Java-DSA">
+
+  <button id="saveBtn">Save Settings</button>
+  <div id="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

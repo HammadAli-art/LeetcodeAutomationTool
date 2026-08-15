@@ -1,0 +1,52 @@
+{
+  "repo_root": "C:\\Users\\Hammad\\Documents\\JAVA\\DSACodingPractice",
+  "problems_subdir": "LeetCode Problems",
+  "default_folder": "Untagged",
+
+  "folder_priority": [
+    { "tags": ["Array"], "folder": "Array" },
+    { "tags": ["String"], "folder": "String" },
+    { "tags": ["Linked List"], "folder": "LinkedList" },
+    { "tags": ["Matrix"], "folder": "Matrix" },
+    { "tags": ["Binary Tree", "Binary Search Tree", "N-ary Tree", "Tree"], "folder": "Trees" },
+    { "tags": ["Graph"], "folder": "Graph" },
+    { "tags": ["Stack", "Monotonic Stack"], "folder": "Stack" },
+    { "tags": ["Queue", "Monotonic Queue"], "folder": "Queue" },
+    { "tags": ["Heap (Priority Queue)"], "folder": "Heap" },
+    { "tags": ["Trie"], "folder": "Trie" },
+    { "tags": ["Hash Table", "Hash Function"], "folder": "HashMap" },
+    { "tags": ["Dynamic Programming"], "folder": "DynamicProgramming" },
+    { "tags": ["Backtracking"], "folder": "Backtracking" },
+    { "tags": ["Greedy"], "folder": "Greedy" },
+    { "tags": ["Binary Search"], "folder": "BinarySearch" },
+    { "tags": ["Math"], "folder": "Math" },
+    { "tags": ["Bit Manipulation"], "folder": "BitManipulation" },
+    { "tags": ["Sliding Window"], "folder": "SlidingWindow" },
+    { "tags": ["Two Pointers"], "folder": "TwoPointers" },
+    { "tags": ["Sorting"], "folder": "Sorting" },
+    { "tags": ["Recursion"], "folder": "Recursion" },
+    { "tags": ["Design"], "folder": "Design" }
+  ],
+
+  "readme_topics": [
+    { "label": "Array", "tags": ["Array"] },
+    { "label": "String", "tags": ["String"] },
+    { "label": "Linked List", "tags": ["Linked List"] },
+    { "label": "Matrix", "tags": ["Matrix"] },
+    { "label": "Trees", "tags": ["Binary Tree", "Binary Search Tree", "N-ary Tree", "Tree"] },
+    { "label": "Graph", "tags": ["Graph"] },
+    { "label": "Stack / Queue", "tags": ["Stack", "Queue", "Monotonic Stack", "Monotonic Queue"] },
+    { "label": "Heap", "tags": ["Heap (Priority Queue)"] },
+    { "label": "Trie", "tags": ["Trie"] },
+    { "label": "Hashing", "tags": ["Hash Table", "Hash Function"] },
+    { "label": "Dynamic Programming", "tags": ["Dynamic Programming"] },
+    { "label": "Backtracking", "tags": ["Backtracking"] },
+    { "label": "Greedy", "tags": ["Greedy"] },
+    { "label": "Binary Search", "tags": ["Binary Search"] },
+    { "label": "Math", "tags": ["Math"] },
+    { "label": "Bit Manipulation", "tags": ["Bit Manipulation"] },
+    { "label": "Sliding Window", "tags": ["Sliding Window"] },
+    { "label": "Two Pointers", "tags": ["Two Pointers"] },
+    { "label": "Sorting", "tags": ["Sorting"] }
+  ]
+}
