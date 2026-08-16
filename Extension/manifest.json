@@ -5,7 +5,8 @@
   "description": "Automatically syncs your accepted LeetCode submissions to GitHub with smart folder organization.",
 
   "permissions": [
-    "storage"
+    "storage",
+    "cookies"
   ],
 
   "host_permissions": [
