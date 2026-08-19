@@ -149,3 +149,87 @@ saveBtn.addEventListener("click", async () => {
     saveBtn.disabled = false;
   }
 });
+
+// ---------------------------------------------------------------------------
+// Full History Import
+// ---------------------------------------------------------------------------
+
+const importBtn = document.getElementById("importBtn");
+const importProgressWrap = document.getElementById("importProgressWrap");
+const importProgressBarFill = document.querySelector("#importProgressBar > div");
+const importStatusText = document.getElementById("importStatusText");
+
+// We don't know the total problem count up front (LeetCode's submissionList
+// doesn't expose it cheaply), so the bar shows real progress relative to
+// what's been processed so far, growing toward — but never quite reaching —
+// 100% while running, then snapping to 100% only once actually complete.
+// This is honest about not knowing the total, while still giving visual
+// feedback that something is happening.
+function renderImportState(state) {
+  if (!state || state.status === "idle") {
+    importBtn.textContent = "Import All Past Submissions";
+    importBtn.classList.remove("cancel");
+    importProgressWrap.style.display = "none";
+    return;
+  }
+
+  const total = state.imported + state.failed;
+
+  if (state.status === "running") {
+    importBtn.textContent = "Cancel Import";
+    importBtn.classList.add("cancel");
+    importProgressWrap.style.display = "block";
+    const pct = Math.min(95, 10 + total * 2); // asymptotic — never claims false completion
+    importProgressBarFill.style.width = `${pct}%`;
+    importStatusText.textContent = state.currentTitle
+      ? `Importing "${state.currentTitle}"… (${state.imported} done, ${state.failed} failed)`
+      : `Starting… (${state.imported} done, ${state.failed} failed)`;
+    return;
+  }
+
+  importBtn.textContent = "Import All Past Submissions";
+  importBtn.classList.remove("cancel");
+  importProgressWrap.style.display = "block";
+
+  if (state.status === "completed") {
+    importProgressBarFill.style.width = "100%";
+    importStatusText.textContent = `Done — ${state.imported} imported, ${state.failed} failed.`;
+  } else if (state.status === "paused") {
+    importProgressBarFill.style.width = `${Math.min(95, 10 + total * 2)}%`;
+    importStatusText.textContent = `Paused — ${state.imported} imported so far. Click to resume.`;
+  } else if (state.status === "error") {
+    importProgressBarFill.style.width = `${Math.min(95, 10 + total * 2)}%`;
+    importStatusText.textContent = `Stopped: ${state.lastError || "unknown error"}. Click to resume.`;
+  }
+}
+
+// Reflect the current state as soon as the popup opens — the import may
+// have been started from a previous popup session and still be running.
+chrome.runtime.sendMessage({ type: "GET_HISTORY_IMPORT_STATE" }, renderImportState);
+
+// Live updates while this popup instance stays open.
+chrome.runtime.onMessage.addListener((message) => {
+  if (message.type === "HISTORY_IMPORT_PROGRESS") {
+    renderImportState(message.state);
+  }
+});
+
+importBtn.addEventListener("click", () => {
+  chrome.runtime.sendMessage({ type: "GET_HISTORY_IMPORT_STATE" }, (state) => {
+    if (state && state.status === "running") {
+      chrome.runtime.sendMessage({ type: "CANCEL_HISTORY_IMPORT" });
+    } else {
+      chrome.storage.local.get(["githubToken", "githubRepo"], (result) => {
+        if (!result.githubToken || !result.githubRepo) {
+          setStatus("Save your GitHub token + repo above before importing.", "red");
+          return;
+        }
+        chrome.runtime.sendMessage({ type: "START_HISTORY_IMPORT" });
+        importBtn.textContent = "Cancel Import";
+        importBtn.classList.add("cancel");
+        importProgressWrap.style.display = "block";
+        importStatusText.textContent = "Starting…";
+      });
+    }
+  });
+});
