@@ -1,6 +1,9 @@
 // This runs INSIDE the LeetCode page, in the EXTENSION's isolated world.
 // It listens for the message that injected.js sends when it detects an
 // Accepted submission, and relays it to the background service worker.
+// submissionId/titleSlug come directly from injected.js (extracted from the
+// actual network request URL) — NOT parsed from window.location.href, since
+// that can lag behind the real submission state.
 
 window.addEventListener("message", (event) => {
   if (event.source !== window) return;
@@ -8,10 +11,17 @@ window.addEventListener("message", (event) => {
 
   if (event.data.type === "ACCEPTED") {
     console.log("LeetCode GitHub Sync: Accepted submission detected!", event.data.payload);
+
+    if (!event.data.submissionId || !event.data.titleSlug) {
+      console.log("LeetCode GitHub Sync: missing submissionId/titleSlug, skipping.");
+      return;
+    }
+
     chrome.runtime.sendMessage({
       type: "SUBMISSION_ACCEPTED",
       payload: event.data.payload,
-      url: window.location.href,
+      submissionId: event.data.submissionId,
+      titleSlug: event.data.titleSlug,
     });
   }
 });
