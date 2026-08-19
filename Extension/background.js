@@ -64,70 +64,240 @@ async function fetchQuestionDetails(titleSlug) {
   return data.question;
 }
 
+// --- One page of the user's own submission history (newest first) ---
+// NOTE: this leans on LeetCode's internal "submissionList" GraphQL field
+// (the same one that powers the "All Submissions" tab). It's not a public
+// documented API, so if LeetCode changes it, this is the first thing to
+// re-check.
+async function fetchAcceptedSubmissionsPage(offset, limit) {
+  const query = `
+    query submissionList($offset: Int!, $limit: Int!, $status: String) {
+      submissionList(offset: $offset, limit: $limit, status: $status) {
+        hasNext
+        submissions {
+          id
+          titleSlug
+          title
+          statusDisplay
+          lang
+          timestamp
+        }
+      }
+    }
+  `;
+  const data = await graphqlRequest(query, { offset, limit, status: "AC" });
+  return data.submissionList;
+}
+
+// Shared by BOTH the live "just solved a problem" flow AND the bulk history
+// import below, so the two paths can never drift out of sync with each other.
+async function handleAcceptedSubmission(submissionId, titleSlug) {
+  try {
+    const [{ code, langName }, question] = await Promise.all([
+      fetchSubmissionCode(parseInt(submissionId, 10)),
+      fetchQuestionDetails(titleSlug),
+    ]);
+
+    // --- Validate the GraphQL responses before touching GitHub. ---
+    // LeetCode can return "question: null" (e.g. slug not found) or a
+    // submissionDetails with no code (e.g. permissions hiccup, stale
+    // session). Pushing in either case would create a blank/garbage
+    // file or throw deep inside pushToGitHub with a confusing error.
+    if (!question || !question.questionFrontendId) {
+      const msg = `question data missing/invalid for slug: ${titleSlug}`;
+      console.error("LeetCode GitHub Sync:", msg, question);
+      return { ok: false, message: msg };
+    }
+    if (!code || typeof code !== "string" || !code.trim()) {
+      const msg = `submission code missing/empty for submission: ${submissionId}`;
+      console.error("LeetCode GitHub Sync:", msg);
+      return { ok: false, message: msg };
+    }
+    if (!langName) {
+      const msg = `language missing for submission: ${submissionId}`;
+      console.error("LeetCode GitHub Sync:", msg);
+      return { ok: false, message: msg };
+    }
+
+    console.log("--- Fetched data ---");
+    console.log("Frontend ID:", question.questionFrontendId);
+    console.log("Title:", question.title);
+    console.log("Topic tags:", (question.topicTags || []).map((t) => t.name));
+    console.log("Language:", langName);
+
+    await pushToGitHub(titleSlug, question, code, langName);
+    return { ok: true };
+  } catch (err) {
+    console.error("Failed to process submission:", err);
+    await recordSyncStatus({
+      ok: false,
+      frontendId: null,
+      title: titleSlug,
+      message: `Failed to fetch submission data: ${err.message || err}`,
+    });
+    return { ok: false, message: err.message || String(err) };
+  }
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "SUBMISSION_ACCEPTED") {
     console.log("Background received an Accepted submission:", message.payload);
-
     const { submissionId, titleSlug } = message;
     if (!submissionId || !titleSlug) {
       console.error("Missing submissionId/titleSlug in message:", message);
       return;
     }
+    handleAcceptedSubmission(submissionId, titleSlug);
+    return;
+  }
 
-    (async () => {
-      try {
-        const [{ code, langName }, question] = await Promise.all([
-          fetchSubmissionCode(parseInt(submissionId, 10)),
-          fetchQuestionDetails(titleSlug),
-        ]);
+  if (message.type === "START_HISTORY_IMPORT") {
+    startHistoryImport(); // fire-and-forget — progress is reported via HISTORY_IMPORT_PROGRESS + storage
+    sendResponse({ started: true });
+    return;
+  }
 
-        // --- Validate the GraphQL responses before touching GitHub. ---
-        // LeetCode can return "question: null" (e.g. slug not found) or a
-        // submissionDetails with no code (e.g. permissions hiccup, stale
-        // session). Pushing in either case would create a blank/garbage
-        // file or throw deep inside pushToGitHub with a confusing error.
-        if (!question || !question.questionFrontendId) {
-          console.error(
-            "LeetCode GitHub Sync: question data missing/invalid for slug:",
-            titleSlug,
-            question
-          );
-          return;
-        }
-        if (!code || typeof code !== "string" || !code.trim()) {
-          console.error(
-            "LeetCode GitHub Sync: submission code missing/empty for submission:",
-            submissionId
-          );
-          return;
-        }
-        if (!langName) {
-          console.error(
-            "LeetCode GitHub Sync: language missing for submission:",
-            submissionId
-          );
-          return;
-        }
+  if (message.type === "CANCEL_HISTORY_IMPORT") {
+    cancelHistoryImport();
+    sendResponse({ cancelling: true });
+    return;
+  }
 
-        console.log("--- Fetched data ---");
-        console.log("Frontend ID:", question.questionFrontendId);
-        console.log("Title:", question.title);
-        console.log("Topic tags:", (question.topicTags || []).map((t) => t.name));
-        console.log("Language:", langName);
-
-        await pushToGitHub(message.titleSlug, question, code, langName);
-      } catch (err) {
-        console.error("Failed to process submission:", err);
-        await recordSyncStatus({
-          ok: false,
-          frontendId: null,
-          title: titleSlug,
-          message: `Failed to fetch submission data: ${err.message || err}`,
-        });
-      }
-    })();
+  if (message.type === "GET_HISTORY_IMPORT_STATE") {
+    getHistoryImportState().then(sendResponse);
+    return true; // keep the message channel open — sendResponse happens async
   }
 });
+
+// ---------------------------------------------------------------------------
+// Full history import — walks the user's entire "Accepted" submission list
+// and pushes every problem to GitHub, reusing the exact same push logic as
+// the live sync (handleAcceptedSubmission / pushToGitHub) so there is only
+// ONE code path that talks to GitHub.
+// ---------------------------------------------------------------------------
+
+const HISTORY_IMPORT_PAGE_SIZE = 20;
+// Deliberately gentle pacing: this is a bulk backfill, not a single live
+// event, and each problem already costs ~3-4 API calls (2 GraphQL + 1-2
+// GitHub). A small delay keeps us well clear of GitHub's/LeetCode's rate
+// limits even on a large history.
+const HISTORY_IMPORT_DELAY_MS = 500;
+
+let historyImportCancelRequested = false;
+
+async function getHistoryImportState() {
+  const { historyImportState } = await chrome.storage.local.get(["historyImportState"]);
+  return (
+    historyImportState || {
+      status: "idle", // idle | running | paused | completed | error
+      offset: 0,
+      processedSlugs: [],
+      imported: 0,
+      failed: 0,
+      currentTitle: null,
+      lastError: null,
+      startedAt: null,
+      updatedAt: null,
+    }
+  );
+}
+
+async function saveHistoryImportState(state) {
+  state.updatedAt = new Date().toISOString();
+  await chrome.storage.local.set({ historyImportState: state });
+  // Popup may not be open — sendMessage rejects silently in that case,
+  // which is fine, since storage is the source of truth on reopen.
+  chrome.runtime.sendMessage({ type: "HISTORY_IMPORT_PROGRESS", state }).catch(() => {});
+}
+
+function cancelHistoryImport() {
+  historyImportCancelRequested = true;
+}
+
+async function startHistoryImport() {
+  const { githubToken, githubRepo } = await chrome.storage.local.get(["githubToken", "githubRepo"]);
+  let state = await getHistoryImportState();
+
+  if (state.status === "running") {
+    console.log("History import already running — ignoring duplicate start.");
+    return;
+  }
+  if (!githubToken || !githubRepo) {
+    state.status = "error";
+    state.lastError = "GitHub not connected — save your token + repo first.";
+    await saveHistoryImportState(state);
+    return;
+  }
+
+  historyImportCancelRequested = false;
+  state.status = "running";
+  state.startedAt = state.startedAt || new Date().toISOString();
+  state.lastError = null;
+  await saveHistoryImportState(state);
+
+  // Resuming an interrupted import picks up from the saved offset/slug set,
+  // instead of starting over and re-pushing everything from scratch.
+  const processedSet = new Set(state.processedSlugs);
+
+  try {
+    while (true) {
+      if (historyImportCancelRequested) {
+        state.status = "paused";
+        await saveHistoryImportState(state);
+        console.log("History import paused by user.");
+        return;
+      }
+
+      const page = await fetchAcceptedSubmissionsPage(state.offset, HISTORY_IMPORT_PAGE_SIZE);
+      const submissions = page?.submissions || [];
+
+      for (const sub of submissions) {
+        if (historyImportCancelRequested) {
+          state.status = "paused";
+          await saveHistoryImportState(state);
+          return;
+        }
+
+        // submissionList returns EVERY accepted submission, including
+        // repeat/resubmitted attempts at the same problem. Since it's
+        // newest-first, the first time we see a titleSlug is already its
+        // latest accepted version — anything after that is a duplicate.
+        if (processedSet.has(sub.titleSlug)) continue;
+
+        state.currentTitle = sub.title;
+        await saveHistoryImportState(state);
+
+        const result = await handleAcceptedSubmission(sub.id, sub.titleSlug);
+
+        processedSet.add(sub.titleSlug);
+        state.processedSlugs = Array.from(processedSet);
+        if (result.ok) state.imported += 1;
+        else state.failed += 1;
+        await saveHistoryImportState(state);
+
+        await new Promise((r) => setTimeout(r, HISTORY_IMPORT_DELAY_MS));
+      }
+
+      state.offset += HISTORY_IMPORT_PAGE_SIZE;
+      await saveHistoryImportState(state);
+
+      if (!page?.hasNext) break;
+    }
+
+    state.status = "completed";
+    state.currentTitle = null;
+    await saveHistoryImportState(state);
+    console.log(`History import complete: ${state.imported} imported, ${state.failed} failed.`);
+  } catch (err) {
+    // A hard failure (e.g. LeetCode's submissionList shape changed) stops
+    // the loop, but the saved offset/processedSlugs mean clicking "Import"
+    // again resumes instead of re-processing everything already done.
+    console.error("History import stopped by an error:", err);
+    state.status = "error";
+    state.lastError = err.message || String(err);
+    await saveHistoryImportState(state);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Folder logic (ported from config.json's folder_priority list)
@@ -203,16 +373,46 @@ function encodeGithubPath(filePath) {
   return filePath.split("/").map(encodeURIComponent).join("/");
 }
 
-async function githubRequest(path, method, body, token) {
-  return fetch(`https://api.github.com${path}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-      "Content-Type": "application/json",
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+// Retries transient failures (network errors, GitHub 5xx, and 403 rate-limit
+// responses) with increasing delays. Does NOT retry 401/404/422 etc. —
+// those are real problems (bad token, wrong repo) that a retry can't fix,
+// so we fail fast instead of wasting time.
+async function githubRequest(path, method, body, token, attempt = 1) {
+  const MAX_ATTEMPTS = 3;
+  const RETRY_DELAYS_MS = [1000, 2000, 4000];
+
+  let response;
+  try {
+    response = await fetch(`https://api.github.com${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "Content-Type": "application/json",
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (networkErr) {
+    // fetch() itself threw — offline, DNS failure, connection reset, etc.
+    if (attempt < MAX_ATTEMPTS) {
+      console.error(`GitHub request network error, retrying (attempt ${attempt}):`, networkErr);
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]));
+      return githubRequest(path, method, body, token, attempt + 1);
+    }
+    throw networkErr;
+  }
+
+  const isRateLimited = response.status === 403 &&
+    response.headers.get("x-ratelimit-remaining") === "0";
+  const isTransientServerError = response.status >= 500;
+
+  if ((isRateLimited || isTransientServerError) && attempt < MAX_ATTEMPTS) {
+    console.error(`GitHub request failed (${response.status}), retrying (attempt ${attempt})`);
+    await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]));
+    return githubRequest(path, method, body, token, attempt + 1);
+  }
+
+  return response;
 }
 
 async function getFileSha(owner, repo, filePath, token) {
