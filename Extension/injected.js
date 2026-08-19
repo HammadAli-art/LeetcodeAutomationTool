@@ -4,6 +4,7 @@
 
 (function () {
   const originalFetch = window.fetch;
+  const notifiedSubmissions = new Set();
 
   window.fetch = async function (...args) {
     const response = await originalFetch.apply(this, args);
@@ -11,15 +12,32 @@
     try {
       const url = typeof args[0] === "string" ? args[0] : args[0]?.url;
 
-      // LeetCode polls this endpoint after you hit Submit, until it has a result.
-      if (url && url.includes("/submissions/detail/") && url.includes("/check/")) {
+      // NOTE: LeetCode's check endpoint is versioned as "v2" now
+      // (e.g. /submissions/detail/2108716447/v2/check/).
+      const match = url && url.match(/\/submissions\/detail\/(\d+)\/v2\/check/);
+
+      if (match) {
+        const submissionId = match[1];
+
         response
           .clone()
           .json()
           .then((data) => {
-            if (data.state === "SUCCESS" && data.status_msg === "Accepted") {
+            if (data.status_code === 10 && data.status_msg === "Accepted") {
+              if (notifiedSubmissions.has(submissionId)) return; // avoid duplicate firing
+              notifiedSubmissions.add(submissionId);
+
+              const slugMatch = window.location.pathname.match(/\/problems\/([a-z0-9\-]+)/);
+              const titleSlug = slugMatch ? slugMatch[1] : null;
+
               window.postMessage(
-                { source: "leetcode-github-sync", type: "ACCEPTED", payload: data },
+                {
+                  source: "leetcode-github-sync",
+                  type: "ACCEPTED",
+                  payload: data,
+                  submissionId,
+                  titleSlug,
+                },
                 "*"
               );
             }
