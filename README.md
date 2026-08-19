@@ -90,6 +90,6 @@ marked with HTML comments so the rest of your README is untouched:
 - [x] Auto-commit + push to GitHub
 - [x] Auto-updating README with stats
 - [x] Full history backfill
-- [ ] Browser extension (real-time, no terminal, installable by anyone)
-- [ ] Multi-language support
+- [x] Browser extension (real-time, no terminal, installable by anyone)
+- [x] Multi-language support
 - [ ] Publish to Chrome Web Store
