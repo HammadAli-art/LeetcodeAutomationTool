@@ -88,6 +88,44 @@
       cursor: pointer;
       text-decoration: underline;
     }
+    #importSection {
+      margin-top: 16px;
+      padding-top: 12px;
+      border-top: 1px solid #eee;
+    }
+    #importSection .label {
+      color: #555;
+      font-weight: bold;
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    #importBtn {
+      background: #24292f;
+    }
+    #importBtn.cancel {
+      background: #d73a49;
+    }
+    #importProgressWrap {
+      margin-top: 10px;
+      display: none;
+    }
+    #importProgressBar {
+      width: 100%;
+      height: 6px;
+      background: #eee;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    #importProgressBar > div {
+      height: 100%;
+      background: #2ea44f;
+      width: 0%;
+    }
+    #importStatusText {
+      margin-top: 6px;
+      font-size: 11px;
+      color: #555;
+    }
   </style>
 </head>
 <body>
@@ -105,6 +143,15 @@
   <div id="lastSync"></div>
   <button id="toggleHistory">Show recent history</button>
   <div id="historyList" style="display:none"></div>
+
+  <div id="importSection">
+    <div class="label">Full History Import</div>
+    <button id="importBtn">Import All Past Submissions</button>
+    <div id="importProgressWrap">
+      <div id="importProgressBar"><div></div></div>
+      <div id="importStatusText"></div>
+    </div>
+  </div>
 
   <script src="popup.js"></script>
 </body>
