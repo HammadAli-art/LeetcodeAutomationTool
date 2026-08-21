@@ -2,14 +2,16 @@ console.log("LeetCode GitHub Sync: popup loaded.");
 
 const tokenInput = document.getElementById("token");
 const repoInput = document.getElementById("repo");
+const leetcodeUsernameInput = document.getElementById("leetcodeUsername");
 const saveBtn = document.getElementById("saveBtn");
 const statusDiv = document.getElementById("status");
 const lastSyncDiv = document.getElementById("lastSync");
 
 // Load any previously saved settings when the popup opens.
-chrome.storage.local.get(["githubToken", "githubRepo"], (result) => {
+chrome.storage.local.get(["githubToken", "githubRepo", "leetcodeUsername"], (result) => {
   if (result.githubToken) tokenInput.value = result.githubToken;
   if (result.githubRepo) repoInput.value = result.githubRepo;
+  if (result.leetcodeUsername) leetcodeUsernameInput.value = result.leetcodeUsername;
 });
 
 // Show what happened on the most recent submission sync, so the user isn't
@@ -32,40 +34,53 @@ chrome.storage.local.get(["lastSync"], (result) => {
   `;
 });
 
-// Full history list (newest first), hidden by default to keep the popup
-// compact — the user expands it only when they actually want to look back.
-const toggleHistoryBtn = document.getElementById("toggleHistory");
-const historyListDiv = document.getElementById("historyList");
-let historyLoaded = false;
+// "Today's Problems" — only successful syncs (solve or resubmit) that
+// happened on today's LOCAL date. This list is naturally short (it only
+// grows during the current day) and resets itself once the date rolls over,
+// without needing any separate cleanup logic.
+const todaysBtn = document.getElementById("todaysProblemsBtn");
+const todaysListDiv = document.getElementById("todaysProblemsList");
 
-toggleHistoryBtn.addEventListener("click", () => {
-  const isHidden = historyListDiv.style.display === "none";
-  historyListDiv.style.display = isHidden ? "block" : "none";
-  toggleHistoryBtn.textContent = isHidden ? "Hide recent history" : "Show recent history";
+function isSameLocalDay(isoTimestamp, reference) {
+  const d = new Date(isoTimestamp);
+  return (
+    d.getFullYear() === reference.getFullYear() &&
+    d.getMonth() === reference.getMonth() &&
+    d.getDate() === reference.getDate()
+  );
+}
 
-  if (isHidden && !historyLoaded) {
-    historyLoaded = true;
-    chrome.storage.local.get(["syncHistory"], (result) => {
-      const history = result.syncHistory || [];
-      if (!history.length) {
-        historyListDiv.innerHTML = `<div class="history-item">No history yet.</div>`;
-        return;
-      }
-      historyListDiv.innerHTML = history
-        .map((h) => {
-          const icon = h.ok ? "✅" : "❌";
-          const when = new Date(h.timestamp).toLocaleString();
-          return `
-            <div class="history-item">
-              ${icon} <span class="title">${h.title || ""}</span>
-              <div>${h.message || ""}</div>
-              <div class="time">${when}</div>
-            </div>
-          `;
-        })
-        .join("");
-    });
-  }
+todaysBtn.addEventListener("click", () => {
+  const isHidden = todaysListDiv.style.display === "none";
+  todaysListDiv.style.display = isHidden ? "block" : "none";
+  todaysBtn.textContent = isHidden ? "Hide Today's Problems" : "Today's Problems";
+
+  if (!isHidden) return;
+
+  // Recomputed every time it's opened (not cached) — cheap, and correctly
+  // handles the popup being left open across midnight.
+  chrome.storage.local.get(["syncHistory"], (result) => {
+    const history = result.syncHistory || [];
+    const now = new Date();
+    const todays = history.filter((h) => h.ok && isSameLocalDay(h.timestamp, now));
+
+    if (!todays.length) {
+      todaysListDiv.innerHTML = `<div class="history-item">No problems solved yet.</div>`;
+      return;
+    }
+
+    todaysListDiv.innerHTML = todays
+      .map((h) => {
+        const when = new Date(h.timestamp).toLocaleTimeString();
+        return `
+          <div class="history-item">
+            <span class="title">${h.title || ""}</span>
+            <div class="time">${when}</div>
+          </div>
+        `;
+      })
+      .join("");
+  });
 });
 
 try {
@@ -114,12 +129,78 @@ async function validateGithubAccess(owner, repo, token) {
   return { ok: true };
 }
 
+// Fetches up to 100 of the user's most recently updated repos. Only fetches
+// one page — a deliberate scope limit for now, so users with 100+ repos may
+// not see everything here and can still type the repo name manually.
+async function fetchUserRepos(token) {
+  const response = await fetch("https://api.github.com/user/repos?per_page=100&sort=updated", {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+    },
+  });
+  if (!response.ok) throw new Error(`GitHub returned ${response.status}`);
+  return response.json();
+}
+
+const loadReposBtn = document.getElementById("loadReposBtn");
+const repoPicker = document.getElementById("repoPicker");
+
+loadReposBtn.addEventListener("click", async () => {
+  let token = tokenInput.value.trim();
+  if (!token) {
+    const stored = await chrome.storage.local.get(["githubToken"]);
+    token = stored.githubToken || "";
+  }
+  if (!token) {
+    setStatus("Connect with GitHub above, or paste a token manually, first.", "red");
+    return;
+  }
+
+  loadReposBtn.disabled = true;
+  loadReposBtn.textContent = "Loading...";
+
+  try {
+    const repos = await fetchUserRepos(token);
+    if (!repos.length) {
+      setStatus("No repos found for this token.", "red");
+      return;
+    }
+
+    repoPicker.innerHTML =
+      `<option value="">— Select a repo —</option>` +
+      repos.map((r) => `<option value="${r.full_name}">${r.full_name}${r.private ? " 🔒" : ""}</option>`).join("");
+    repoPicker.style.display = "block";
+    setStatus(`Loaded ${repos.length} repos (most recently updated).`, "#555");
+  } catch (err) {
+    console.error("Failed to load repos:", err);
+    setStatus("Couldn't load repos — check your token.", "red");
+  } finally {
+    loadReposBtn.disabled = false;
+    loadReposBtn.textContent = "Load My Repos";
+  }
+});
+
+repoPicker.addEventListener("change", () => {
+  if (repoPicker.value) repoInput.value = repoPicker.value;
+});
+
 saveBtn.addEventListener("click", async () => {
-  const githubToken = tokenInput.value.trim();
+  const manualToken = tokenInput.value.trim();
   const githubRepo = repoInput.value.trim();
 
-  if (!githubToken || !githubRepo) {
-    setStatus("Please fill in both fields.", "red");
+  // Manual field left blank -> keep whatever token is already saved (most
+  // commonly one obtained via "Connect with GitHub"). Filling it in
+  // deliberately overrides that, for advanced/manual use.
+  const { githubToken: existingToken } = await chrome.storage.local.get(["githubToken"]);
+  const githubToken = manualToken || existingToken;
+
+  if (!githubToken) {
+    setStatus("Connect with GitHub above, or paste a token manually.", "red");
+    return;
+  }
+  if (!githubRepo) {
+    setStatus("Please enter a repo.", "red");
     return;
   }
 
@@ -139,7 +220,7 @@ saveBtn.addEventListener("click", async () => {
       return;
     }
 
-    chrome.storage.local.set({ githubToken, githubRepo }, () => {
+    chrome.storage.local.set({ githubToken, githubRepo, leetcodeUsername: leetcodeUsernameInput.value.trim() }, () => {
       setStatus("Saved! GitHub connection verified.", "green");
     });
   } catch (err) {
@@ -218,18 +299,171 @@ importBtn.addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "GET_HISTORY_IMPORT_STATE" }, (state) => {
     if (state && state.status === "running") {
       chrome.runtime.sendMessage({ type: "CANCEL_HISTORY_IMPORT" });
-    } else {
-      chrome.storage.local.get(["githubToken", "githubRepo"], (result) => {
-        if (!result.githubToken || !result.githubRepo) {
-          setStatus("Save your GitHub token + repo above before importing.", "red");
-          return;
-        }
-        chrome.runtime.sendMessage({ type: "START_HISTORY_IMPORT" });
-        importBtn.textContent = "Cancel Import";
-        importBtn.classList.add("cancel");
-        importProgressWrap.style.display = "block";
-        importStatusText.textContent = "Starting…";
-      });
+      return;
     }
+
+    if (state && state.status === "completed") {
+      importStatusText.innerHTML =
+        `History already imported (${state.imported} problems). ` +
+        `<a href="#" id="restartImportLink">Start fresh import</a>`;
+      const restartLink = document.getElementById("restartImportLink");
+      restartLink.addEventListener("click", (e) => {
+        e.preventDefault();
+        chrome.runtime.sendMessage({ type: "RESET_HISTORY_IMPORT" }, () => {
+          chrome.runtime.sendMessage({ type: "START_HISTORY_IMPORT" });
+          importBtn.textContent = "Cancel Import";
+          importBtn.classList.add("cancel");
+          importStatusText.textContent = "Starting…";
+        });
+      });
+      return;
+    }
+
+    chrome.storage.local.get(["githubToken", "githubRepo"], (result) => {
+      if (!result.githubToken || !result.githubRepo) {
+        setStatus("Save your GitHub token + repo above before importing.", "red");
+        return;
+      }
+      chrome.runtime.sendMessage({ type: "START_HISTORY_IMPORT" });
+      importBtn.textContent = "Cancel Import";
+      importBtn.classList.add("cancel");
+      importProgressWrap.style.display = "block";
+      importStatusText.textContent = "Starting…";
+    });
   });
+});
+
+// ---------------------------------------------------------------------------
+// Google Sheets ON/OFF toggle
+// ---------------------------------------------------------------------------
+// Off by default. Nothing is sent to Google until the user explicitly turns
+// this on — matching the same "user's choice, not automatic" philosophy
+// requested for this feature.
+
+const sheetsBtn = document.getElementById("sheetsBtn");
+const sheetsStatusText = document.getElementById("sheetsStatusText");
+
+function renderSheetsState(state) {
+  if (!state || !state.enabled) {
+    sheetsBtn.textContent = "Turn On Google Sheets Sync";
+    sheetsBtn.classList.remove("on");
+    sheetsStatusText.innerHTML = state?.connected
+      ? "Off. (Previously connected — turning on reuses your existing sheet.)"
+      : "Off.";
+    return;
+  }
+  sheetsBtn.textContent = "Turn Off Google Sheets Sync";
+  sheetsBtn.classList.add("on");
+  sheetsStatusText.innerHTML = state.url
+    ? `On — <a href="${state.url}" target="_blank">open your sheet</a>`
+    : "On.";
+}
+
+chrome.runtime.sendMessage({ type: "GET_SHEETS_STATE" }, renderSheetsState);
+
+sheetsBtn.addEventListener("click", () => {
+  chrome.runtime.sendMessage({ type: "GET_SHEETS_STATE" }, (state) => {
+    const turningOn = !(state && state.enabled);
+
+    sheetsBtn.disabled = true;
+    sheetsStatusText.textContent = turningOn ? "Connecting to Google…" : "Turning off…";
+
+    chrome.runtime.sendMessage({ type: "TOGGLE_GOOGLE_SHEETS", enable: turningOn }, (result) => {
+      sheetsBtn.disabled = false;
+      if (turningOn && result && result.ok === false) {
+        sheetsStatusText.textContent = `Couldn't connect: ${result.message || "unknown error"}`;
+        return;
+      }
+      chrome.runtime.sendMessage({ type: "GET_SHEETS_STATE" }, renderSheetsState);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GitHub Connect (Device Flow)
+// ---------------------------------------------------------------------------
+
+const githubConnectBtn = document.getElementById("githubConnectBtn");
+const githubConnectStatus = document.getElementById("githubConnectStatus");
+const deviceCodeBox = document.getElementById("deviceCodeBox");
+const deviceCodeText = document.getElementById("deviceCodeText");
+const copyDeviceCodeBtn = document.getElementById("copyDeviceCodeBtn");
+const deviceVerifyLink = document.getElementById("deviceVerifyLink");
+const deviceFlowStatusText = document.getElementById("deviceFlowStatusText");
+const cancelDeviceFlowBtn = document.getElementById("cancelDeviceFlowBtn");
+
+function renderGithubConnectionState(state) {
+  deviceCodeBox.style.display = "none";
+  githubConnectBtn.disabled = false;
+
+  if (state && state.connected) {
+    githubConnectBtn.textContent = "Disconnect GitHub";
+    githubConnectBtn.classList.add("on");
+    githubConnectStatus.textContent = state.username
+      ? `✅ Connected as ${state.username}`
+      : "✅ Connected.";
+  } else {
+    githubConnectBtn.textContent = "Connect with GitHub";
+    githubConnectBtn.classList.remove("on");
+    githubConnectStatus.textContent = "Not connected.";
+  }
+}
+
+chrome.runtime.sendMessage({ type: "GET_GITHUB_CONNECTION_STATE" }, renderGithubConnectionState);
+
+githubConnectBtn.addEventListener("click", () => {
+  chrome.runtime.sendMessage({ type: "GET_GITHUB_CONNECTION_STATE" }, (state) => {
+    if (state && state.connected) {
+      chrome.runtime.sendMessage({ type: "DISCONNECT_GITHUB" }, () => {
+        renderGithubConnectionState({ connected: false });
+      });
+      return;
+    }
+
+    githubConnectBtn.disabled = true;
+    githubConnectStatus.textContent = "Starting…";
+    chrome.runtime.sendMessage({ type: "START_GITHUB_DEVICE_FLOW" });
+  });
+});
+
+cancelDeviceFlowBtn.addEventListener("click", () => {
+  chrome.runtime.sendMessage({ type: "CANCEL_GITHUB_DEVICE_FLOW" });
+  deviceCodeBox.style.display = "none";
+  githubConnectBtn.disabled = false;
+  githubConnectStatus.textContent = "Cancelled.";
+});
+
+copyDeviceCodeBtn.addEventListener("click", () => {
+  navigator.clipboard.writeText(deviceCodeText.textContent).then(() => {
+    copyDeviceCodeBtn.textContent = "Copied!";
+    setTimeout(() => { copyDeviceCodeBtn.textContent = "Copy"; }, 1500);
+  }).catch(() => {});
+});
+
+// Device Flow progress arrives as runtime messages, since it runs entirely
+// in the background service worker (continues even if this popup closes —
+// e.g. the user opening the verification link in a new tab).
+chrome.runtime.onMessage.addListener((message) => {
+  if (message.type === "GITHUB_DEVICE_CODE") {
+    githubConnectStatus.textContent = "";
+    deviceCodeBox.style.display = "block";
+    deviceCodeText.textContent = message.user_code;
+    deviceVerifyLink.href = message.verification_uri;
+    deviceVerifyLink.textContent = `Open ${message.verification_uri.replace(/^https?:\/\//, "")}`;
+    deviceFlowStatusText.textContent = "Waiting for you to authorize on GitHub…";
+    return;
+  }
+
+  if (message.type === "GITHUB_DEVICE_FLOW_RESULT") {
+    githubConnectBtn.disabled = false;
+    deviceCodeBox.style.display = "none";
+
+    if (message.ok) {
+      renderGithubConnectionState({ connected: true, username: message.username });
+    } else if (message.cancelled) {
+      githubConnectStatus.textContent = "Cancelled.";
+    } else {
+      githubConnectStatus.textContent = `Connection failed: ${message.message || "unknown error"}`;
+    }
+  }
 });
