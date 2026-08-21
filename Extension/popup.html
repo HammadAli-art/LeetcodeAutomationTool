@@ -37,6 +37,77 @@
       cursor: pointer;
       font-size: 13px;
     }
+    button.secondary {
+      background: #f0f0f0;
+      color: #333;
+      margin-top: 6px;
+      font-size: 12px;
+      padding: 6px;
+    }
+    select {
+      width: 100%;
+      padding: 6px;
+      box-sizing: border-box;
+      font-size: 12px;
+    }
+    #githubConnectSection {
+      margin-top: 4px;
+    }
+    #githubConnectSection .label {
+      color: #555;
+      font-weight: bold;
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    #githubConnectBtn {
+      background: #24292f;
+    }
+    #githubConnectBtn.on {
+      background: #d73a49;
+    }
+    #githubConnectStatus {
+      margin-top: 6px;
+      font-size: 12px;
+      color: #555;
+    }
+    #deviceCodeBox {
+      margin-top: 10px;
+      padding: 10px;
+      background: #f6f8fa;
+      border-radius: 4px;
+      border: 1px solid #e1e4e8;
+    }
+    .device-code-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .device-code {
+      font-family: monospace;
+      font-size: 18px;
+      font-weight: bold;
+      letter-spacing: 2px;
+      color: #24292f;
+    }
+    #deviceCodeBox a {
+      display: inline-block;
+      margin-top: 8px;
+      font-size: 12px;
+      color: #0366d6;
+    }
+    #deviceFlowStatusText {
+      margin-top: 6px;
+      font-size: 11px;
+      color: #777;
+    }
+    #manualTokenDetails {
+      margin-top: 14px;
+      font-size: 12px;
+    }
+    #manualTokenDetails summary {
+      color: #777;
+      cursor: pointer;
+    }
     #status {
       margin-top: 8px;
       font-size: 12px;
@@ -61,7 +132,7 @@
       font-size: 11px;
       margin-top: 2px;
     }
-    #historyList {
+    #todaysProblemsList {
       margin-top: 10px;
       max-height: 160px;
       overflow-y: auto;
@@ -77,7 +148,7 @@
     .history-item .time {
       color: #888;
     }
-    #toggleHistory {
+    #todaysProblemsBtn {
       background: none;
       color: #0366d6;
       border: none;
@@ -126,23 +197,76 @@
       font-size: 11px;
       color: #555;
     }
+    #sheetsSection {
+      margin-top: 16px;
+      padding-top: 12px;
+      border-top: 1px solid #eee;
+    }
+    #sheetsSection .label {
+      color: #555;
+      font-weight: bold;
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    .sheets-desc {
+      font-size: 11px;
+      color: #777;
+      margin-bottom: 8px;
+      line-height: 1.4;
+    }
+    #sheetsBtn {
+      background: #0f9d58;
+    }
+    #sheetsBtn.on {
+      background: #d73a49;
+    }
+    #sheetsStatusText {
+      margin-top: 8px;
+      font-size: 12px;
+    }
+    #sheetsStatusText a {
+      color: #0366d6;
+    }
   </style>
 </head>
 <body>
   <h2>LeetCode GitHub Sync — Settings</h2>
 
-  <label for="token">GitHub Personal Access Token</label>
-  <input type="password" id="token" placeholder="ghp_xxxxxxxxxxxx">
+  <div id="githubConnectSection">
+    <div class="label">GitHub Connection</div>
+    <button id="githubConnectBtn">Connect with GitHub</button>
+    <div id="githubConnectStatus">Not connected.</div>
+    <div id="deviceCodeBox" style="display:none;">
+      <div class="device-code-row">
+        <span id="deviceCodeText" class="device-code"></span>
+        <button type="button" id="copyDeviceCodeBtn" class="secondary">Copy</button>
+      </div>
+      <a id="deviceVerifyLink" href="#" target="_blank"></a>
+      <div id="deviceFlowStatusText"></div>
+      <button type="button" id="cancelDeviceFlowBtn" class="secondary">Cancel</button>
+    </div>
+  </div>
+
+  <details id="manualTokenDetails">
+    <summary>Advanced: paste a token manually instead</summary>
+    <label for="token">GitHub Personal Access Token</label>
+    <input type="password" id="token" placeholder="ghp_xxxxxxxxxxxx">
+  </details>
 
   <label for="repo">Repo (owner/repo-name)</label>
   <input type="text" id="repo" placeholder="HammadAli-art/Java-DSA">
+  <button type="button" id="loadReposBtn" class="secondary">Load My Repos</button>
+  <select id="repoPicker" style="display:none; margin-top: 8px;"></select>
+
+  <label for="leetcodeUsername">LeetCode Username</label>
+  <input type="text" id="leetcodeUsername" placeholder="Hammad-Babar">
 
   <button id="saveBtn">Save Settings</button>
   <div id="status"></div>
 
   <div id="lastSync"></div>
-  <button id="toggleHistory">Show recent history</button>
-  <div id="historyList" style="display:none"></div>
+  <button id="todaysProblemsBtn">Today's Problems</button>
+  <div id="todaysProblemsList" style="display:none"></div>
 
   <div id="importSection">
     <div class="label">Full History Import</div>
@@ -151,6 +275,13 @@
       <div id="importProgressBar"><div></div></div>
       <div id="importStatusText"></div>
     </div>
+  </div>
+
+  <div id="sheetsSection">
+    <div class="label">Google Sheets Sync</div>
+    <div class="sheets-desc">Optional but recommended — logs every solved problem (ID, title, difficulty, topics, language, date) into a Google Sheet automatically. Off by default; nothing is sent to Google until you turn this on.</div>
+    <button id="sheetsBtn">Turn On Google Sheets Sync</button>
+    <div id="sheetsStatusText">Off.</div>
   </div>
 
   <script src="popup.js"></script>
