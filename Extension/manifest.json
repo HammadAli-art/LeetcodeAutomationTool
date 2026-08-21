@@ -6,13 +6,22 @@
 
   "permissions": [
     "storage",
-    "cookies"
+    "cookies",
+    "alarms",
+    "identity"
   ],
 
   "host_permissions": [
     "https://leetcode.com/*",
-    "https://api.github.com/*"
+    "https://api.github.com/*",
+    "https://github.com/*",
+    "https://sheets.googleapis.com/*"
   ],
+
+  "oauth2": {
+    "client_id": "269153151298-kc5ehf2l4l85ok38o230kcjk6udg36vj.apps.googleusercontent.com",
+    "scopes": ["https://www.googleapis.com/auth/spreadsheets"]
+  },
 
   "content_scripts": [
     {
