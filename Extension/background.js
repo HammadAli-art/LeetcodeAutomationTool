@@ -1,5 +1,5 @@
 // This runs in the background, independent of any specific page.
-console.log("LeetCode GitHub Sync: background service worker loaded.");
+console.log("Kodelith: background service worker loaded.");
 
 const GRAPHQL_URL = "https://leetcode.com/graphql";
 
@@ -64,6 +64,25 @@ async function fetchQuestionDetails(titleSlug) {
   return data.question;
 }
 
+// Whoever is actually logged into LeetCode in THIS browser right now — read
+// live via the session cookies, every time it's needed. This deliberately
+// avoids storing a username anywhere: if the person switches LeetCode
+// accounts, the very next submission automatically reflects the new
+// account, with no stale saved value and no manual field to update.
+async function fetchLoggedInUsername() {
+  const query = `
+    query getUserStatus {
+      userStatus {
+        isSignedIn
+        username
+      }
+    }
+  `;
+  const data = await graphqlRequest(query, {});
+  if (!data.userStatus || !data.userStatus.isSignedIn) return null;
+  return data.userStatus.username || null;
+}
+
 // --- One page of the user's own submission history (newest first) ---
 // NOTE: this leans on LeetCode's internal "submissionList" GraphQL field
 // (the same one that powers the "All Submissions" tab). It's not a public
@@ -112,17 +131,17 @@ async function handleAcceptedSubmission(submissionId, titleSlug, { updateReadmeA
     // file or throw deep inside pushToGitHub with a confusing error.
     if (!question || !question.questionFrontendId) {
       const msg = `question data missing/invalid for slug: ${titleSlug}`;
-      console.error("LeetCode GitHub Sync:", msg, question);
+      console.error("Kodelith:", msg, question);
       return { ok: false, message: msg };
     }
     if (!code || typeof code !== "string" || !code.trim()) {
       const msg = `submission code missing/empty for submission: ${submissionId}`;
-      console.error("LeetCode GitHub Sync:", msg);
+      console.error("Kodelith:", msg);
       return { ok: false, message: msg };
     }
     if (!langName) {
       const msg = `language missing for submission: ${submissionId}`;
-      console.error("LeetCode GitHub Sync:", msg);
+      console.error("Kodelith:", msg);
       return { ok: false, message: msg };
     }
 
@@ -175,22 +194,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // keep the message channel open — sendResponse happens async
   }
 
-  if (message.type === "CONNECT_GOOGLE_SHEETS") {
-    connectGoogleSheets().then(sendResponse);
-    return true;
-  }
-
   if (message.type === "TOGGLE_GOOGLE_SHEETS") {
     if (message.enable) {
       connectGoogleSheets().then(sendResponse);
     } else {
       disableGoogleSheets().then(() => sendResponse({ ok: true, enabled: false }));
     }
-    return true;
-  }
-
-  if (message.type === "DISCONNECT_GOOGLE_SHEETS") {
-    disconnectGoogleSheets().then(() => sendResponse({ disconnected: true }));
     return true;
   }
 
@@ -207,6 +216,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "START_SHEETS_BACKFILL") {
+    startSheetsBackfill(); // fire-and-forget — progress comes via SHEETS_BACKFILL_PROGRESS + storage
+    sendResponse({ started: true });
+    return;
+  }
+
+  if (message.type === "CANCEL_SHEETS_BACKFILL") {
+    cancelSheetsBackfill();
+    sendResponse({ cancelling: true });
+    return;
+  }
+
+  if (message.type === "GET_SHEETS_BACKFILL_STATE") {
+    getSheetsBackfillState().then(sendResponse);
+    return true;
+  }
+
   if (message.type === "START_GITHUB_DEVICE_FLOW") {
     connectGithubViaDeviceFlow(); // fire-and-forget — progress comes via GITHUB_DEVICE_CODE / GITHUB_DEVICE_FLOW_RESULT
     sendResponse({ started: true });
@@ -217,6 +243,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     cancelGithubDeviceFlow();
     sendResponse({ cancelling: true });
     return;
+  }
+
+  if (message.type === "GET_GITHUB_DEVICE_FLOW_STATE") {
+    getGithubDeviceFlowState().then((state) => {
+      sendResponse(state);
+      // Opportunistic recheck: if the popup is being reopened, there's a
+      // decent chance the user just came back from authorizing — check now
+      // instead of making them wait for the next 1-minute alarm tick.
+      if (state && state.status === "pending") attemptGithubTokenPoll();
+    });
+    return true;
   }
 
   if (message.type === "GET_GITHUB_CONNECTION_STATE") {
@@ -253,7 +290,7 @@ const GITHUB_CLIENT_ID = "Ov23lijEs9khKmBR44VJ";
 const GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code";
 const GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token";
 
-let githubDeviceFlowCancelRequested = false;
+const GITHUB_DEVICE_FLOW_ALARM = "githubDeviceFlowPoll";
 
 async function requestGithubDeviceCode() {
   const response = await fetch(GITHUB_DEVICE_CODE_URL, {
@@ -265,84 +302,121 @@ async function requestGithubDeviceCode() {
   return response.json(); // { device_code, user_code, verification_uri, expires_in, interval }
 }
 
-// Polls GitHub every `interval` seconds until the user approves on
-// github.com/login/device, the code expires, or the user cancels from the
-// popup. "authorization_pending" is the expected/normal response while
-// waiting — it is NOT an error.
-async function pollGithubAccessToken(deviceCode, interval, expiresIn) {
-  const deadline = Date.now() + expiresIn * 1000;
-  let waitSeconds = interval;
-
-  while (Date.now() < deadline) {
-    if (githubDeviceFlowCancelRequested) throw new Error("__CANCELLED__");
-
-    await new Promise((r) => setTimeout(r, waitSeconds * 1000));
-    if (githubDeviceFlowCancelRequested) throw new Error("__CANCELLED__");
-
-    const response = await fetch(GITHUB_ACCESS_TOKEN_URL, {
-      method: "POST",
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
-      body: JSON.stringify({
-        client_id: GITHUB_CLIENT_ID,
-        device_code: deviceCode,
-        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-      }),
-    });
-    const data = await response.json();
-
-    if (data.access_token) return data.access_token;
-    if (data.error === "authorization_pending") continue;
-    if (data.error === "slow_down") { waitSeconds += data.interval || 5; continue; }
-    if (data.error === "expired_token") throw new Error("Code expired — click Connect to try again.");
-    if (data.error === "access_denied") throw new Error("Authorization was denied on GitHub.");
-    throw new Error(data.error_description || data.error || "GitHub sign-in failed.");
-  }
-  throw new Error("Code expired — click Connect to try again.");
+async function getGithubDeviceFlowState() {
+  const { githubDeviceFlow } = await chrome.storage.local.get(["githubDeviceFlow"]);
+  return githubDeviceFlow || null;
 }
 
-function cancelGithubDeviceFlow() {
-  githubDeviceFlowCancelRequested = true;
+async function saveGithubDeviceFlowState(state) {
+  await chrome.storage.local.set({ githubDeviceFlow: state });
+}
+
+async function clearGithubDeviceFlowState() {
+  await chrome.storage.local.remove(["githubDeviceFlow"]);
+  chrome.alarms.clear(GITHUB_DEVICE_FLOW_ALARM);
 }
 
 async function connectGithubViaDeviceFlow() {
-  githubDeviceFlowCancelRequested = false;
   try {
     const { device_code, user_code, verification_uri, expires_in, interval } = await requestGithubDeviceCode();
 
-    // Popup may not be open yet when this fires — that's fine, it also
-    // re-checks GET_GITHUB_CONNECTION_STATE and the code itself is short-lived
-    // anyway (typically 15 min), so a closed popup just means the user
-    // re-opens it and clicks Connect again.
+    await saveGithubDeviceFlowState({
+      device_code,
+      user_code,
+      verification_uri,
+      expires_at: Date.now() + expires_in * 1000,
+      interval,
+      status: "pending",
+    });
+
+    // Popup may not be open yet — that's fine, GET_GITHUB_DEVICE_FLOW_STATE
+    // lets it recover the code + status on reopen regardless.
     chrome.runtime
       .sendMessage({ type: "GITHUB_DEVICE_CODE", user_code, verification_uri, expires_in })
       .catch(() => {});
 
-    const accessToken = await pollGithubAccessToken(device_code, interval, expires_in);
+    // Try immediately (handles fast approvers), then hand off to the alarm
+    // for every check after that.
+    await attemptGithubTokenPoll();
 
-    const userResponse = await fetch("https://api.github.com/user", {
-      headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/vnd.github+json" },
-    });
-    const userData = userResponse.ok ? await userResponse.json() : {};
-
-    await chrome.storage.local.set({
-      githubToken: accessToken,
-      githubUsername: userData.login || null,
-      githubAuthMethod: "oauth",
-    });
-
-    chrome.runtime
-      .sendMessage({ type: "GITHUB_DEVICE_FLOW_RESULT", ok: true, username: userData.login || null })
-      .catch(() => {});
+    // IMPORTANT: poll via chrome.alarms, NOT setTimeout. A plain setTimeout
+    // loop silently dies the moment Chrome puts this idle service worker to
+    // sleep — which can easily happen while the user is over on GitHub's
+    // page authorizing. Alarms are the one mechanism Chrome guarantees will
+    // wake this service worker back up, so the flow reliably finishes even
+    // if the worker was killed and restarted in between polls.
+    chrome.alarms.create(GITHUB_DEVICE_FLOW_ALARM, { periodInMinutes: 1 });
   } catch (err) {
-    if (err.message === "__CANCELLED__") {
-      chrome.runtime.sendMessage({ type: "GITHUB_DEVICE_FLOW_RESULT", ok: false, cancelled: true }).catch(() => {});
-      return;
-    }
-    console.error("GitHub Device Flow failed:", err);
+    console.error("GitHub Device Flow failed to start:", err);
+    await clearGithubDeviceFlowState();
     chrome.runtime
       .sendMessage({ type: "GITHUB_DEVICE_FLOW_RESULT", ok: false, message: err.message || String(err) })
       .catch(() => {});
   }
+}
+
+// A single poll attempt — called once immediately when the flow starts, and
+// again on every alarm tick after that. State lives in storage (not memory),
+// so this works correctly even if the service worker restarted in between.
+async function attemptGithubTokenPoll() {
+  const state = await getGithubDeviceFlowState();
+  if (!state || state.status !== "pending") return; // nothing in progress
+
+  if (Date.now() > state.expires_at) {
+    await clearGithubDeviceFlowState();
+    chrome.runtime
+      .sendMessage({ type: "GITHUB_DEVICE_FLOW_RESULT", ok: false, message: "Code expired — click Connect to try again." })
+      .catch(() => {});
+    return;
+  }
+
+  const response = await fetch(GITHUB_ACCESS_TOKEN_URL, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({
+      client_id: GITHUB_CLIENT_ID,
+      device_code: state.device_code,
+      grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+    }),
+  });
+  const data = await response.json();
+
+  if (data.access_token) {
+    const userResponse = await fetch("https://api.github.com/user", {
+      headers: { Authorization: `Bearer ${data.access_token}`, Accept: "application/vnd.github+json" },
+    });
+    const userData = userResponse.ok ? await userResponse.json() : {};
+
+    await chrome.storage.local.set({
+      githubToken: data.access_token,
+      githubUsername: userData.login || null,
+      githubAuthMethod: "oauth",
+    });
+    await clearGithubDeviceFlowState();
+    chrome.runtime
+      .sendMessage({ type: "GITHUB_DEVICE_FLOW_RESULT", ok: true, username: userData.login || null })
+      .catch(() => {});
+    return;
+  }
+
+  if (data.error === "authorization_pending") return; // normal — the next alarm tick tries again
+  if (data.error === "slow_down") return; // our 1-minute cadence already respects any reasonable slow_down request
+
+  // Anything else is a real stop condition (expired, denied, or unexpected).
+  await clearGithubDeviceFlowState();
+  let message = "GitHub sign-in failed.";
+  if (data.error === "expired_token") message = "Code expired — click Connect to try again.";
+  else if (data.error === "access_denied") message = "Authorization was denied on GitHub.";
+  else if (data.error_description) message = data.error_description;
+  chrome.runtime.sendMessage({ type: "GITHUB_DEVICE_FLOW_RESULT", ok: false, message }).catch(() => {});
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === GITHUB_DEVICE_FLOW_ALARM) attemptGithubTokenPoll();
+});
+
+async function cancelGithubDeviceFlow() {
+  await clearGithubDeviceFlowState();
 }
 
 async function disconnectGithub() {
@@ -390,17 +464,44 @@ async function saveHistoryImportState(state) {
   chrome.runtime.sendMessage({ type: "HISTORY_IMPORT_PROGRESS", state }).catch(() => {});
 }
 
-function cancelHistoryImport() {
-  historyImportCancelRequested = true;
+function isStaleRunningState(state, staleAfterMs) {
+  if (!state || state.status !== "running") return false;
+  const lastUpdate = state.updatedAt ? new Date(state.updatedAt).getTime() : 0;
+  return Date.now() - lastUpdate > staleAfterMs;
 }
+
+// Cancelling writes "paused" straight to storage (not just an in-memory
+// flag) so the popup reflects it immediately even in the rare case the loop
+// itself has already died — the in-memory flag still handles the normal
+// case where the loop is alive and checks it between items.
+async function cancelHistoryImport() {
+  historyImportCancelRequested = true;
+  const state = await getHistoryImportState();
+  if (state.status === "running") {
+    state.status = "paused";
+    await saveHistoryImportState(state);
+  }
+}
+
+// If Chrome ever terminates this service worker mid-import (it can, for a
+// long-running background loop — see the Device Flow fix above for the same
+// class of issue), storage is left saying "running" forever, with nothing
+// left alive to ever change it. Without this check, clicking "Import" again
+// would just see "running" and silently do nothing — the user would be
+// stuck with no way to resume. A stale "running" (no progress in 2+ minutes)
+// is treated as dead, not actually in progress.
+const HISTORY_IMPORT_STALE_MS = 2 * 60 * 1000;
 
 async function startHistoryImport() {
   const { githubToken, githubRepo } = await chrome.storage.local.get(["githubToken", "githubRepo"]);
   let state = await getHistoryImportState();
 
-  if (state.status === "running") {
+  if (state.status === "running" && !isStaleRunningState(state, HISTORY_IMPORT_STALE_MS)) {
     console.log("History import already running — ignoring duplicate start.");
     return;
+  }
+  if (state.status === "running") {
+    console.log("Previous history import appears to have stopped unexpectedly — resuming.");
   }
   if (!githubToken || !githubRepo) {
     state.status = "error";
@@ -806,27 +907,111 @@ function applyStatsCardUsername(content, username) {
   );
 }
 
+function buildStatsCardBlock(username) {
+  const safeUsername = username ? encodeURIComponent(username) : "your-leetcode-username";
+  return (
+    `## 📊 LeetCode Stats\n` +
+    `<div align="center">\n` +
+    `  <img src="https://leetcard.jacoblin.cool/${safeUsername}?theme=dark&font=baloo2&ext=heatmap" alt="LeetCode Stats" />\n` +
+    `</div>`
+  );
+}
+
+function buildTopicsSectionBlock(folderCounts) {
+  return (
+    `## 🗂️ Topics Covered\n` +
+    `<details>\n` +
+    `<summary><b>Click to expand topic checklist</b></summary>\n\n` +
+    `<!-- AUTO-TOPICS:START -->\n${buildTopicsChecklist(folderCounts)}\n<!-- AUTO-TOPICS:END -->\n` +
+    `</details>`
+  );
+}
+
+function buildStatsSectionBlock(folderCounts) {
+  return (
+    `## 📈 Auto-Generated Progress\n` +
+    `<!-- AUTO-STATS:START -->\n${buildStatsTable(folderCounts)}\n<!-- AUTO-STATS:END -->`
+  );
+}
+
+// A brand-new repo typically has either no README.md at all, or just a bare
+// "# repo-name" from GitHub's own "Initialize with README" checkbox — so a
+// fresh install must be able to produce a complete, working README with zero
+// manual setup, not just silently do nothing until the user copies in a
+// template by hand.
+function buildDefaultReadme(folderCounts, username) {
+  return [
+    "# LeetCode Progress",
+    "",
+    buildStatsCardBlock(username),
+    "",
+    "---",
+    "",
+    buildTopicsSectionBlock(folderCounts),
+    "",
+    "---",
+    "",
+    buildStatsSectionBlock(folderCounts),
+    "",
+  ].join("\n");
+}
+
 async function updateReadme(owner, repo, token) {
   try {
+    const folderCounts = await getFolderCounts(owner, repo, token);
+    // Read live from LeetCode's own session rather than a saved setting —
+    // this is always accurate (including across account switches) and one
+    // less thing for the user to configure. If the lookup fails for any
+    // reason (logged out, network hiccup), we fall back to whatever was
+    // already in the README rather than blocking the stats update entirely.
+    const leetcodeUsername = await fetchLoggedInUsername().catch((err) => {
+      console.error("Couldn't detect the logged-in LeetCode username (non-fatal):", err);
+      return null;
+    });
+
     const response = await githubRequest(
       `/repos/${owner}/${repo}/contents/${encodeGithubPath(README_PATH)}`, "GET", null, token
     );
+
     if (response.status === 404) {
-      console.log("No README.md found in the repo — skipping stats update.");
+      // No README at all yet — create a complete one from scratch so this
+      // works out of the box for every new user, not just ones who happen
+      // to already have the exact template in place.
+      const freshReadme = buildDefaultReadme(folderCounts, leetcodeUsername);
+      await putFile(owner, repo, README_PATH, toBase64(freshReadme), "Create README with LeetCode stats [automated]", null, token);
+      console.log("✅ Created a new README.md with stats.");
       return;
     }
     if (!response.ok) throw new Error(`Failed to fetch README: ${response.status}`);
 
     const data = await response.json();
     const currentContent = fromBase64(data.content);
-
-    const folderCounts = await getFolderCounts(owner, repo, token);
-    const { leetcodeUsername } = await chrome.storage.local.get(["leetcodeUsername"]);
-
     let updated = currentContent;
-    updated = replaceMarkerSection(updated, "AUTO-TOPICS", buildTopicsChecklist(folderCounts));
-    updated = replaceMarkerSection(updated, "AUTO-STATS", buildStatsTable(folderCounts));
-    updated = applyStatsCardUsername(updated, leetcodeUsername);
+
+    const hasTopicsMarkers = /<!--\s*AUTO-TOPICS:START\s*-->/.test(updated);
+    const hasStatsMarkers = /<!--\s*AUTO-STATS:START\s*-->/.test(updated);
+    const hasStatsCard = /https:\/\/leetcard\.jacoblin\.cool\//.test(updated);
+
+    if (hasTopicsMarkers) {
+      updated = replaceMarkerSection(updated, "AUTO-TOPICS", buildTopicsChecklist(folderCounts));
+    } else {
+      // Existing README (even a trivial "# repo-name") is never discarded —
+      // the missing section is appended so nothing the user already wrote
+      // is lost, while every user still ends up with working sections.
+      updated = updated.trimEnd() + "\n\n---\n\n" + buildTopicsSectionBlock(folderCounts) + "\n";
+    }
+
+    if (hasStatsMarkers) {
+      updated = replaceMarkerSection(updated, "AUTO-STATS", buildStatsTable(folderCounts));
+    } else {
+      updated = updated.trimEnd() + "\n\n---\n\n" + buildStatsSectionBlock(folderCounts) + "\n";
+    }
+
+    if (hasStatsCard) {
+      updated = applyStatsCardUsername(updated, leetcodeUsername);
+    } else {
+      updated = buildStatsCardBlock(leetcodeUsername) + "\n\n---\n\n" + updated.trimStart();
+    }
 
     if (updated === currentContent) {
       console.log("README stats already up to date — no commit needed.");
@@ -853,7 +1038,7 @@ async function updateReadme(owner, repo, token) {
 
 const SHEETS_API_BASE = "https://sheets.googleapis.com/v4/spreadsheets";
 const SHEET_TAB_NAME = "Sheet1"; // default tab name Google gives new spreadsheets
-const SHEET_HEADER_ROW = ["Problem ID", "Title", "Difficulty", "Topics", "Language", "Date Solved", "LeetCode Link"];
+const SHEET_HEADER_ROW = ["Problem ID", "Title", "Difficulty", "Topics", "Language", "Date Solved", "GitHub Link"];
 
 function getGoogleAuthToken({ interactive = true } = {}) {
   return new Promise((resolve, reject) => {
@@ -917,7 +1102,13 @@ async function connectGoogleSheets() {
     }
 
     await chrome.storage.local.set({ sheetsSpreadsheetId: spreadsheetId, sheetsEnabled: true });
-    return { ok: true, spreadsheetId, url: `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit` };
+
+    // Tell the caller whether there are already-pushed GitHub problems that
+    // predate this connection — the popup uses this to offer a one-time
+    // backfill instead of silently leaving them out of the sheet forever.
+    const backfillCount = await getSheetsBackfillCandidateCount().catch(() => 0);
+
+    return { ok: true, spreadsheetId, url: `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`, backfillCount };
   } catch (err) {
     console.error("Google Sheets connect failed:", err);
     return { ok: false, message: err.message || String(err) };
@@ -928,16 +1119,6 @@ async function connectGoogleSheets() {
 // access — so turning it back on later is instant, no re-auth or new sheet.
 async function disableGoogleSheets() {
   await chrome.storage.local.set({ sheetsEnabled: false });
-}
-
-async function disconnectGoogleSheets() {
-  await chrome.storage.local.remove(["sheetsSpreadsheetId", "sheetsEnabled"]);
-  try {
-    const token = await getGoogleAuthToken({ interactive: false });
-    chrome.identity.removeCachedAuthToken({ token });
-  } catch {
-    // No cached token to remove — fine.
-  }
 }
 
 // Finds an existing row for this problem (matched by ID in column A), so a
@@ -952,13 +1133,16 @@ async function findExistingSheetRow(spreadsheetId, frontendId, token) {
   return rowIndex === -1 ? null : rowIndex + 2; // +2: header row + 1-based indexing
 }
 
-async function syncProblemToSheet(titleSlug, question, langName) {
+async function syncProblemToSheet(question, langName, { owner, repo, filePath }) {
   try {
     const { sheetsSpreadsheetId, sheetsEnabled } = await chrome.storage.local.get(["sheetsSpreadsheetId", "sheetsEnabled"]);
     if (!sheetsEnabled || !sheetsSpreadsheetId) return; // user hasn't turned this on — nothing to do, not an error
 
     const token = await getGoogleAuthToken({ interactive: false });
     const frontendId = question.questionFrontendId;
+    // "HEAD" resolves to whatever the repo's default branch actually is
+    // (main/master/etc.) without needing an extra API call to look it up.
+    const githubLink = `https://github.com/${owner}/${repo}/blob/HEAD/${encodeGithubPath(filePath)}`;
     const row = [
       frontendId,
       question.title,
@@ -966,7 +1150,7 @@ async function syncProblemToSheet(titleSlug, question, langName) {
       (question.topicTags || []).map((t) => t.name).join(", "),
       langName,
       new Date().toISOString().split("T")[0],
-      `https://leetcode.com/problems/${titleSlug}/`,
+      githubLink,
     ];
 
     const existingRowNum = await findExistingSheetRow(sheetsSpreadsheetId, frontendId, token);
@@ -985,6 +1169,178 @@ async function syncProblemToSheet(titleSlug, question, langName) {
     // Sheets sync is an optional layer on top of the real push — same
     // philosophy as README sync. Never let it report the push itself as failed.
     console.error("Failed to sync to Google Sheets (non-fatal):", err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Google Sheets backfill — for problems that were already pushed to GitHub
+// BEFORE Sheets sync was turned on (or while it was temporarily off). Never
+// touches GitHub — only adds the missing rows to the sheet.
+// ---------------------------------------------------------------------------
+
+// Reconstructs {frontendId, title-guess, extension} for every problem file
+// actually sitting in the repo, straight from the filenames — this is the
+// same naming scheme buildFilePath() uses, so it reverses cleanly.
+async function listAllGithubProblems(owner, repo, token) {
+  const rootResponse = await githubRequest(
+    `/repos/${owner}/${repo}/contents/${encodeGithubPath(PROBLEMS_SUBDIR)}`, "GET", null, token
+  );
+  if (rootResponse.status === 404) return [];
+  if (!rootResponse.ok) throw new Error(`Failed to list "${PROBLEMS_SUBDIR}": ${rootResponse.status}`);
+
+  const entries = await rootResponse.json();
+  const subfolders = entries.filter((e) => e.type === "dir");
+
+  const problems = [];
+  for (const folder of subfolders) {
+    const listResponse = await githubRequest(
+      `/repos/${owner}/${repo}/contents/${encodeGithubPath(`${PROBLEMS_SUBDIR}/${folder.name}`)}`, "GET", null, token
+    );
+    if (!listResponse.ok) continue;
+    const files = await listResponse.json();
+    for (const f of files) {
+      if (f.type !== "file") continue;
+      const match = f.name.match(/^(\d+)_(.+)\.([a-zA-Z0-9]+)$/);
+      if (!match) continue;
+      problems.push({
+        frontendId: match[1],
+        titleGuess: match[2].replace(/_/g, " "),
+        extension: match[3].toLowerCase(),
+        folder: folder.name,
+        path: f.path,
+      });
+    }
+  }
+  return problems;
+}
+
+// Best-effort reverse of a title into the URL slug LeetCode would use — this
+// is how LeetCode derives slugs for the vast majority of problem titles.
+// A guess that doesn't resolve is skipped (reported, never silently lost),
+// rather than guessed at further or failing the whole backfill.
+function titleToSlugGuess(title) {
+  return title.toLowerCase().replace(/'/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+const EXT_TO_LANG_DISPLAY = {
+  java: "Java", py: "Python3", cpp: "C++", js: "JavaScript", c: "C",
+  cs: "C#", go: "Go", kt: "Kotlin", swift: "Swift", ts: "TypeScript",
+};
+
+async function getSheetLoggedFrontendIds(spreadsheetId, token) {
+  const response = await sheetsRequest(`/${spreadsheetId}/values/${SHEET_TAB_NAME}!A2:A`, "GET", null, token);
+  if (!response.ok) return new Set();
+  const data = await response.json();
+  return new Set((data.values || []).map((row) => String(row[0]).trim()));
+}
+
+async function getSheetsBackfillCandidateCount() {
+  const { githubToken, githubRepo, sheetsSpreadsheetId } = await chrome.storage.local.get([
+    "githubToken", "githubRepo", "sheetsSpreadsheetId",
+  ]);
+  if (!githubToken || !githubRepo || !sheetsSpreadsheetId) return 0;
+  const [owner, repo] = githubRepo.split("/");
+  const googleToken = await getGoogleAuthToken({ interactive: false });
+
+  const [githubProblems, loggedIds] = await Promise.all([
+    listAllGithubProblems(owner, repo, githubToken),
+    getSheetLoggedFrontendIds(sheetsSpreadsheetId, googleToken),
+  ]);
+  return githubProblems.filter((p) => !loggedIds.has(String(p.frontendId))).length;
+}
+
+const SHEETS_BACKFILL_DELAY_MS = 400;
+let sheetsBackfillCancelRequested = false;
+
+async function getSheetsBackfillState() {
+  const { sheetsBackfillState } = await chrome.storage.local.get(["sheetsBackfillState"]);
+  return sheetsBackfillState || { status: "idle", total: 0, done: 0, imported: 0, skipped: 0, currentTitle: null };
+}
+
+async function saveSheetsBackfillState(state) {
+  state.updatedAt = new Date().toISOString();
+  await chrome.storage.local.set({ sheetsBackfillState: state });
+  chrome.runtime.sendMessage({ type: "SHEETS_BACKFILL_PROGRESS", state }).catch(() => {});
+}
+
+async function cancelSheetsBackfill() {
+  sheetsBackfillCancelRequested = true;
+  const state = await getSheetsBackfillState();
+  if (state.status === "running") {
+    state.status = "paused";
+    await saveSheetsBackfillState(state);
+  }
+}
+
+const SHEETS_BACKFILL_STALE_MS = 2 * 60 * 1000;
+
+async function startSheetsBackfill() {
+  const { githubToken, githubRepo, sheetsSpreadsheetId } = await chrome.storage.local.get([
+    "githubToken", "githubRepo", "sheetsSpreadsheetId",
+  ]);
+  if (!githubToken || !githubRepo || !sheetsSpreadsheetId) return;
+
+  const existingState = await getSheetsBackfillState();
+  if (existingState.status === "running" && !isStaleRunningState(existingState, SHEETS_BACKFILL_STALE_MS)) {
+    console.log("Sheets backfill already running — ignoring duplicate start.");
+    return;
+  }
+
+  const [owner, repo] = githubRepo.split("/");
+
+  sheetsBackfillCancelRequested = false;
+  let state = { status: "running", total: 0, done: 0, imported: 0, skipped: 0, currentTitle: null };
+  await saveSheetsBackfillState(state);
+
+  try {
+    const googleToken = await getGoogleAuthToken({ interactive: false });
+    const [githubProblems, loggedIds] = await Promise.all([
+      listAllGithubProblems(owner, repo, githubToken),
+      getSheetLoggedFrontendIds(sheetsSpreadsheetId, googleToken),
+    ]);
+    const missing = githubProblems.filter((p) => !loggedIds.has(String(p.frontendId)));
+
+    state.total = missing.length;
+    await saveSheetsBackfillState(state);
+
+    for (const p of missing) {
+      if (sheetsBackfillCancelRequested) {
+        state.status = "paused";
+        await saveSheetsBackfillState(state);
+        return;
+      }
+
+      state.currentTitle = p.titleGuess;
+      await saveSheetsBackfillState(state);
+
+      const slugGuess = titleToSlugGuess(p.titleGuess);
+      try {
+        const question = await fetchQuestionDetails(slugGuess);
+        if (question && question.questionFrontendId) {
+          const langName = EXT_TO_LANG_DISPLAY[p.extension] || p.extension.toUpperCase();
+          await syncProblemToSheet(question, langName, { owner, repo, filePath: p.path });
+          state.imported += 1;
+        } else {
+          state.skipped += 1; // couldn't confidently match this filename to a LeetCode problem
+        }
+      } catch (err) {
+        console.error(`Sheets backfill: couldn't match "${p.titleGuess}" (${slugGuess}):`, err);
+        state.skipped += 1;
+      }
+
+      state.done += 1;
+      await saveSheetsBackfillState(state);
+      await new Promise((r) => setTimeout(r, SHEETS_BACKFILL_DELAY_MS));
+    }
+
+    state.status = "completed";
+    state.currentTitle = null;
+    await saveSheetsBackfillState(state);
+  } catch (err) {
+    console.error("Sheets backfill stopped by an error:", err);
+    state.status = "error";
+    state.lastError = err.message || String(err);
+    await saveSheetsBackfillState(state);
   }
 }
 
@@ -1078,7 +1434,7 @@ async function pushToGitHub(titleSlug, question, code, langName, { updateReadmeA
     // update, not a full-file rewrite, so it runs per-problem even during
     // bulk import rather than being batched like the README.
     if (updateSheetAfter) {
-      await syncProblemToSheet(titleSlug, question, langName);
+      await syncProblemToSheet(question, langName, { owner, repo, filePath });
     }
 
     await recordSyncStatus({
