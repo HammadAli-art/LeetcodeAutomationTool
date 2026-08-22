@@ -1,8 +1,15 @@
 {
   "manifest_version": 3,
-  "name": "LeetCode GitHub Sync",
+  "name": "Kodelith",
   "version": "0.1.0",
-  "description": "Automatically syncs your accepted LeetCode submissions to GitHub with smart folder organization.",
+  "description": "Kodelith automatically syncs your accepted LeetCode submissions to GitHub with smart folder organization, an auto-updating README, and optional Google Sheets tracking.",
+
+  "icons": {
+    "16": "Icons/Icon16.png",
+    "32": "Icons/Icon32.png",
+    "48": "Icons/Icon48.png",
+    "128": "Icons/Icon128.png"
+  },
 
   "permissions": [
     "storage",
@@ -20,7 +27,9 @@
 
   "oauth2": {
     "client_id": "269153151298-kc5ehf2l4l85ok38o230kcjk6udg36vj.apps.googleusercontent.com",
-    "scopes": ["https://www.googleapis.com/auth/spreadsheets"]
+    "scopes": [
+      "https://www.googleapis.com/auth/spreadsheets"
+    ]
   },
 
   "content_scripts": [
@@ -43,6 +52,11 @@
 
   "action": {
     "default_popup": "popup.html",
-    "default_title": "LeetCode GitHub Sync"
+    "default_title": "Kodelith",
+    "default_icon": {
+      "16": "Icons/Icon16.png",
+      "32": "Icons/Icon32.png",
+      "48": "Icons/Icon48.png"
+    }
   }
 }
