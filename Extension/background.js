@@ -817,8 +817,10 @@ async function findExistingFile(owner, repo, folder, frontendId, token) {
 
 const README_PATH = "README.md";
 
-// Maps each checklist line to the GitHub folder(s) that count toward it.
-// Some checklist items (e.g. "Stack / Queue") map to more than one folder.
+// Maps each checklist line to the folder(s) whose LeetCode tags count
+// toward it. Some checklist items (e.g. "Stack / Queue") map to more than
+// one folder. The actual LeetCode tag names are pulled from FOLDER_PRIORITY
+// itself (single source of truth) rather than duplicated here.
 const TOPIC_CHECKLIST = [
   { label: "Array", folders: ["Array"] },
   { label: "String", folders: ["String"] },
@@ -841,9 +843,28 @@ const TOPIC_CHECKLIST = [
   { label: "Sorting", folders: ["Sorting"] },
 ];
 
+function leetcodeTagsForFolder(folderName) {
+  return FOLDER_PRIORITY.filter((e) => e.folder === folderName).flatMap((e) => e.tags);
+}
+
+// Remembers every LeetCode tag a solved problem has (not just the single
+// folder its file was placed in), keyed by frontend ID. A problem's file
+// lives in exactly ONE folder (its highest-priority tag, so there's never a
+// duplicate file) — but the checklist below is deliberately independent of
+// that: it should reflect every topic a solved problem genuinely touches,
+// the same way a hand-maintained checklist would.
+async function mergeTopicTagsCache(frontendId, topicTags) {
+  if (!frontendId) return;
+  const { problemTopicTags = {} } = await chrome.storage.local.get(["problemTopicTags"]);
+  problemTopicTags[frontendId] = (topicTags || []).map((t) => t.name);
+  await chrome.storage.local.set({ problemTopicTags });
+}
+
 // Lists "LeetCode Problems/", then counts files inside each topic subfolder
 // that's actually present. Folders with zero files (or that don't exist yet)
-// simply don't appear — same effect as a count of 0.
+// simply don't appear — same effect as a count of 0. This stays
+// folder/file-based on purpose: it's meant to reflect physical organization
+// on GitHub, unlike the checklist below.
 async function getFolderCounts(owner, repo, token) {
   const rootResponse = await githubRequest(
     `/repos/${owner}/${repo}/contents/${encodeGithubPath(PROBLEMS_SUBDIR)}`, "GET", null, token
@@ -867,9 +888,16 @@ async function getFolderCounts(owner, repo, token) {
   return counts;
 }
 
-function buildTopicsChecklist(folderCounts) {
+// Checked based on the UNION of every solved problem's full tag list — a
+// topic is covered if ANY solved problem was tagged with it, regardless of
+// which single folder that problem's file physically ended up in.
+function buildTopicsChecklist(topicTagsCache) {
+  const allSolvedTags = new Set();
+  Object.values(topicTagsCache).forEach((tags) => tags.forEach((t) => allSolvedTags.add(t)));
+
   return TOPIC_CHECKLIST.map((item) => {
-    const solved = item.folders.some((f) => (folderCounts[f] || 0) > 0);
+    const relevantTags = item.folders.flatMap(leetcodeTagsForFolder);
+    const solved = relevantTags.some((t) => allSolvedTags.has(t));
     return `- [${solved ? "x" : " "}] ${item.label}`;
   }).join("\n");
 }
@@ -917,12 +945,12 @@ function buildStatsCardBlock(username) {
   );
 }
 
-function buildTopicsSectionBlock(folderCounts) {
+function buildTopicsSectionBlock(topicTagsCache) {
   return (
     `## 🗂️ Topics Covered\n` +
     `<details>\n` +
     `<summary><b>Click to expand topic checklist</b></summary>\n\n` +
-    `<!-- AUTO-TOPICS:START -->\n${buildTopicsChecklist(folderCounts)}\n<!-- AUTO-TOPICS:END -->\n` +
+    `<!-- AUTO-TOPICS:START -->\n${buildTopicsChecklist(topicTagsCache)}\n<!-- AUTO-TOPICS:END -->\n` +
     `</details>`
   );
 }
@@ -939,7 +967,7 @@ function buildStatsSectionBlock(folderCounts) {
 // fresh install must be able to produce a complete, working README with zero
 // manual setup, not just silently do nothing until the user copies in a
 // template by hand.
-function buildDefaultReadme(folderCounts, username) {
+function buildDefaultReadme(folderCounts, topicTagsCache, username) {
   return [
     "# LeetCode Progress",
     "",
@@ -947,7 +975,7 @@ function buildDefaultReadme(folderCounts, username) {
     "",
     "---",
     "",
-    buildTopicsSectionBlock(folderCounts),
+    buildTopicsSectionBlock(topicTagsCache),
     "",
     "---",
     "",
@@ -959,6 +987,7 @@ function buildDefaultReadme(folderCounts, username) {
 async function updateReadme(owner, repo, token) {
   try {
     const folderCounts = await getFolderCounts(owner, repo, token);
+    const { problemTopicTags = {} } = await chrome.storage.local.get(["problemTopicTags"]);
     // Read live from LeetCode's own session rather than a saved setting —
     // this is always accurate (including across account switches) and one
     // less thing for the user to configure. If the lookup fails for any
@@ -977,7 +1006,7 @@ async function updateReadme(owner, repo, token) {
       // No README at all yet — create a complete one from scratch so this
       // works out of the box for every new user, not just ones who happen
       // to already have the exact template in place.
-      const freshReadme = buildDefaultReadme(folderCounts, leetcodeUsername);
+      const freshReadme = buildDefaultReadme(folderCounts, problemTopicTags, leetcodeUsername);
       await putFile(owner, repo, README_PATH, toBase64(freshReadme), "Create README with LeetCode stats [automated]", null, token);
       console.log("✅ Created a new README.md with stats.");
       return;
@@ -993,12 +1022,12 @@ async function updateReadme(owner, repo, token) {
     const hasStatsCard = /https:\/\/leetcard\.jacoblin\.cool\//.test(updated);
 
     if (hasTopicsMarkers) {
-      updated = replaceMarkerSection(updated, "AUTO-TOPICS", buildTopicsChecklist(folderCounts));
+      updated = replaceMarkerSection(updated, "AUTO-TOPICS", buildTopicsChecklist(problemTopicTags));
     } else {
       // Existing README (even a trivial "# repo-name") is never discarded —
       // the missing section is appended so nothing the user already wrote
       // is lost, while every user still ends up with working sections.
-      updated = updated.trimEnd() + "\n\n---\n\n" + buildTopicsSectionBlock(folderCounts) + "\n";
+      updated = updated.trimEnd() + "\n\n---\n\n" + buildTopicsSectionBlock(problemTopicTags) + "\n";
     }
 
     if (hasStatsMarkers) {
@@ -1318,6 +1347,7 @@ async function startSheetsBackfill() {
         const question = await fetchQuestionDetails(slugGuess);
         if (question && question.questionFrontendId) {
           const langName = EXT_TO_LANG_DISPLAY[p.extension] || p.extension.toUpperCase();
+          await mergeTopicTagsCache(question.questionFrontendId, question.topicTags);
           await syncProblemToSheet(question, langName, { owner, repo, filePath: p.path });
           state.imported += 1;
         } else {
@@ -1373,6 +1403,11 @@ async function recordSyncStatus({ ok, frontendId, title, message }) {
 }
 
 async function pushToGitHub(titleSlug, question, code, langName, { updateReadmeAfter = true, updateSheetAfter = true } = {}) {
+  // Record the full tag list for this problem regardless of what happens
+  // next — this is what lets the README checklist reflect every topic a
+  // solved problem touches, not just the one folder its file lives in.
+  await mergeTopicTagsCache(question.questionFrontendId, question.topicTags);
+
   const { githubToken, githubRepo } = await chrome.storage.local.get(["githubToken", "githubRepo"]);
   if (!githubToken || !githubRepo) {
     console.error("GitHub settings missing — open the extension popup and save your token + repo.");
