@@ -1,17 +1,15 @@
-console.log("LeetCode GitHub Sync: popup loaded.");
+console.log("Kodelith: popup loaded.");
 
 const tokenInput = document.getElementById("token");
 const repoInput = document.getElementById("repo");
-const leetcodeUsernameInput = document.getElementById("leetcodeUsername");
 const saveBtn = document.getElementById("saveBtn");
 const statusDiv = document.getElementById("status");
 const lastSyncDiv = document.getElementById("lastSync");
 
 // Load any previously saved settings when the popup opens.
-chrome.storage.local.get(["githubToken", "githubRepo", "leetcodeUsername"], (result) => {
+chrome.storage.local.get(["githubToken", "githubRepo"], (result) => {
   if (result.githubToken) tokenInput.value = result.githubToken;
   if (result.githubRepo) repoInput.value = result.githubRepo;
-  if (result.leetcodeUsername) leetcodeUsernameInput.value = result.leetcodeUsername;
 });
 
 // Show what happened on the most recent submission sync, so the user isn't
@@ -20,14 +18,14 @@ chrome.storage.local.get(["githubToken", "githubRepo", "leetcodeUsername"], (res
 chrome.storage.local.get(["lastSync"], (result) => {
   const s = result.lastSync;
   if (!s) {
-    lastSyncDiv.innerHTML = `<div class="label">Last Sync</div><div>No submissions synced yet.</div>`;
+    lastSyncDiv.innerHTML = `<div class="label">🕒 Last Sync</div><div>No submissions synced yet.</div>`;
     return;
   }
   const icon = s.ok ? "✅" : "❌";
   const color = s.ok ? "#2ea44f" : "#d73a49";
   const when = new Date(s.timestamp).toLocaleString();
   lastSyncDiv.innerHTML = `
-    <div class="label">Last Sync</div>
+    <div class="label">🕒 Last Sync</div>
     <div style="color:${color}">${icon} <span class="title">${s.title || ""}</span></div>
     <div>${s.message || ""}</div>
     <div class="time">${when}</div>
@@ -53,7 +51,7 @@ function isSameLocalDay(isoTimestamp, reference) {
 todaysBtn.addEventListener("click", () => {
   const isHidden = todaysListDiv.style.display === "none";
   todaysListDiv.style.display = isHidden ? "block" : "none";
-  todaysBtn.textContent = isHidden ? "Hide Today's Problems" : "Today's Problems";
+  todaysBtn.textContent = isHidden ? "📅 Hide Today's Problems" : "📅 Today's Problems";
 
   if (!isHidden) return;
 
@@ -220,7 +218,7 @@ saveBtn.addEventListener("click", async () => {
       return;
     }
 
-    chrome.storage.local.set({ githubToken, githubRepo, leetcodeUsername: leetcodeUsernameInput.value.trim() }, () => {
+    chrome.storage.local.set({ githubToken, githubRepo }, () => {
       setStatus("Saved! GitHub connection verified.", "green");
     });
   } catch (err) {
@@ -342,6 +340,13 @@ importBtn.addEventListener("click", () => {
 
 const sheetsBtn = document.getElementById("sheetsBtn");
 const sheetsStatusText = document.getElementById("sheetsStatusText");
+const sheetsBackfillPrompt = document.getElementById("sheetsBackfillPrompt");
+const sheetsBackfillMessage = document.getElementById("sheetsBackfillMessage");
+const sheetsBackfillYesBtn = document.getElementById("sheetsBackfillYesBtn");
+const sheetsBackfillNoBtn = document.getElementById("sheetsBackfillNoBtn");
+const sheetsBackfillProgressWrap = document.getElementById("sheetsBackfillProgressWrap");
+const sheetsBackfillProgressBarFill = document.querySelector("#sheetsBackfillProgressBar > div");
+const sheetsBackfillStatusText = document.getElementById("sheetsBackfillStatusText");
 
 function renderSheetsState(state) {
   if (!state || !state.enabled) {
@@ -375,8 +380,62 @@ sheetsBtn.addEventListener("click", () => {
         return;
       }
       chrome.runtime.sendMessage({ type: "GET_SHEETS_STATE" }, renderSheetsState);
+
+      // Only offer the backfill when turning ON, and only if there's an
+      // actual gap — problems already on GitHub from before this connection
+      // (or from while Sheets sync was off) that never made it into the sheet.
+      if (turningOn && result && result.backfillCount > 0) {
+        sheetsBackfillMessage.textContent =
+          `${result.backfillCount} problem${result.backfillCount === 1 ? "" : "s"} already on GitHub ` +
+          `${result.backfillCount === 1 ? "wasn't" : "weren't"} added to your sheet. Add ${result.backfillCount === 1 ? "it" : "them"} now?`;
+        sheetsBackfillPrompt.style.display = "block";
+      }
     });
   });
+});
+
+sheetsBackfillNoBtn.addEventListener("click", () => {
+  sheetsBackfillPrompt.style.display = "none";
+});
+
+sheetsBackfillYesBtn.addEventListener("click", () => {
+  sheetsBackfillPrompt.style.display = "none";
+  sheetsBackfillProgressWrap.style.display = "block";
+  sheetsBackfillStatusText.textContent = "Starting…";
+  chrome.runtime.sendMessage({ type: "START_SHEETS_BACKFILL" });
+});
+
+function renderSheetsBackfillState(state) {
+  if (!state || state.status === "idle") {
+    sheetsBackfillProgressWrap.style.display = "none";
+    return;
+  }
+
+  sheetsBackfillProgressWrap.style.display = "block";
+  const pct = state.total > 0 ? Math.round((state.done / state.total) * 100) : 0;
+  sheetsBackfillProgressBarFill.style.width = `${pct}%`;
+
+  if (state.status === "running") {
+    sheetsBackfillStatusText.textContent = state.currentTitle
+      ? `Adding "${state.currentTitle}"… (${state.done}/${state.total})`
+      : `Starting… (${state.done}/${state.total})`;
+  } else if (state.status === "completed") {
+    sheetsBackfillStatusText.textContent =
+      `Done — ${state.imported} added${state.skipped ? `, ${state.skipped} couldn't be matched` : ""}.`;
+  } else if (state.status === "paused") {
+    sheetsBackfillStatusText.textContent = `Paused — ${state.done}/${state.total} processed.`;
+  } else if (state.status === "error") {
+    sheetsBackfillStatusText.textContent = `Stopped: ${state.lastError || "unknown error"}.`;
+  }
+}
+
+// Restore progress if a backfill was left running when the popup closed.
+chrome.runtime.sendMessage({ type: "GET_SHEETS_BACKFILL_STATE" }, renderSheetsBackfillState);
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message.type === "SHEETS_BACKFILL_PROGRESS") {
+    renderSheetsBackfillState(message.state);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -384,6 +443,7 @@ sheetsBtn.addEventListener("click", () => {
 // ---------------------------------------------------------------------------
 
 const githubConnectBtn = document.getElementById("githubConnectBtn");
+const githubConnectBtnLabel = githubConnectBtn.querySelector("span");
 const githubConnectStatus = document.getElementById("githubConnectStatus");
 const deviceCodeBox = document.getElementById("deviceCodeBox");
 const deviceCodeText = document.getElementById("deviceCodeText");
@@ -397,19 +457,39 @@ function renderGithubConnectionState(state) {
   githubConnectBtn.disabled = false;
 
   if (state && state.connected) {
-    githubConnectBtn.textContent = "Disconnect GitHub";
+    githubConnectBtnLabel.textContent = "Disconnect GitHub";
     githubConnectBtn.classList.add("on");
     githubConnectStatus.textContent = state.username
       ? `✅ Connected as ${state.username}`
       : "✅ Connected.";
   } else {
-    githubConnectBtn.textContent = "Connect with GitHub";
+    githubConnectBtnLabel.textContent = "Connect with GitHub";
     githubConnectBtn.classList.remove("on");
     githubConnectStatus.textContent = "Not connected.";
   }
 }
 
+function showDeviceCodeBox(user_code, verification_uri) {
+  githubConnectStatus.textContent = "";
+  deviceCodeBox.style.display = "block";
+  deviceCodeText.textContent = user_code;
+  deviceVerifyLink.href = verification_uri;
+  deviceVerifyLink.textContent = `Open ${verification_uri.replace(/^https?:\/\//, "")}`;
+  deviceFlowStatusText.textContent = "Waiting for you to authorize on GitHub…";
+  githubConnectBtn.disabled = true;
+}
+
 chrome.runtime.sendMessage({ type: "GET_GITHUB_CONNECTION_STATE" }, renderGithubConnectionState);
+
+// If a Device Flow was left mid-authorization (e.g. the user opened the
+// verification link in a new tab, which closes this popup) and hasn't
+// resolved yet, restore the code box on reopen instead of just showing
+// "Not connected" and confusing them.
+chrome.runtime.sendMessage({ type: "GET_GITHUB_DEVICE_FLOW_STATE" }, (state) => {
+  if (state && state.status === "pending") {
+    showDeviceCodeBox(state.user_code, state.verification_uri);
+  }
+});
 
 githubConnectBtn.addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "GET_GITHUB_CONNECTION_STATE" }, (state) => {
@@ -445,12 +525,7 @@ copyDeviceCodeBtn.addEventListener("click", () => {
 // e.g. the user opening the verification link in a new tab).
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === "GITHUB_DEVICE_CODE") {
-    githubConnectStatus.textContent = "";
-    deviceCodeBox.style.display = "block";
-    deviceCodeText.textContent = message.user_code;
-    deviceVerifyLink.href = message.verification_uri;
-    deviceVerifyLink.textContent = `Open ${message.verification_uri.replace(/^https?:\/\//, "")}`;
-    deviceFlowStatusText.textContent = "Waiting for you to authorize on GitHub…";
+    showDeviceCodeBox(message.user_code, message.verification_uri);
     return;
   }
 
